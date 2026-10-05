@@ -1,0 +1,4 @@
+* { box-sizing: border-box; }
+body { margin: 0; color: #162437; background: #f5f7fa; font-family: Arial, "Microsoft YaHei", sans-serif; }
+main { max-width: 760px; margin: 72px auto; padding: 32px; background: white; border-radius: 12px; }
+h1 { margin-top: 0; }

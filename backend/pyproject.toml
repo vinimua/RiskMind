@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "risk-platform"
+version = "0.1.0"
+description = "Credit risk model monitoring and governed iteration platform"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic-settings",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx"]
+workflow = ["langgraph", "langgraph-checkpoint-postgres"]
+database = ["sqlalchemy", "alembic", "psycopg[binary]"]
+worker = ["celery[redis]"]
+modelops = ["mlflow"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
