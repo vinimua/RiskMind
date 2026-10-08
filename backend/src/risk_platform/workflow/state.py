@@ -1,4 +1,19 @@
-"""Define a small, versioned case graph state here during phase 2.
+"""Minimal state contract for the V0 investigation workflow."""
 
-Store stable IDs and control data; large evidence remains in business storage.
-"""
+from typing import Literal, NotRequired, TypedDict
+
+
+InvestigationPhase = Literal[
+    "PLANNING",
+    "INVESTIGATING",
+    "OBSERVING",
+    "REPLANNING",
+]
+
+
+class InvestigationState(TypedDict):
+    """State shared by the nodes in the investigation skeleton."""
+
+    query: str
+    phase: NotRequired[InvestigationPhase]
+    investigation_complete: NotRequired[bool]
