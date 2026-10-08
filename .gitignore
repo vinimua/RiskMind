@@ -16,3 +16,4 @@ web/.turbo/
 *.db
 artifacts/
 data/
+/python/

@@ -1,32 +1,34 @@
-"""Deterministic placeholder nodes for the V0 investigation workflow."""
+"""Nodes for the V0 investigation workflow."""
 
+from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow.state import InvestigationState
 
+investigation_agent = InvestigationAgent()
 
-def initial_planning(_: InvestigationState) -> dict[str, object]:
-    """Enter the planning phase."""
 
-    return {"phase": "PLANNING"}
+def initial_planning(state: InvestigationState) -> dict[str, object]:
+    """Ask the Investigation Agent what the first round should investigate."""
+
+    result = investigation_agent.initial_plan(state["query"])
+
+    return {"investigation_needs": result}
 
 
 def task_execution(_: InvestigationState) -> dict[str, object]:
-    """Enter the task execution phase."""
+    """Run the V0 task-execution placeholder."""
 
-    return {"phase": "INVESTIGATING"}
+    return {}
 
 
 def observation(_: InvestigationState) -> dict[str, object]:
-    """Enter the observation phase."""
+    """Run the V0 observation placeholder."""
 
-    return {"phase": "OBSERVING"}
+    return {}
 
 
 def replanning(_: InvestigationState) -> dict[str, object]:
-    """Enter replanning and end the V0 investigation path."""
+    """Run replanning and end the V0 investigation path."""
 
     # Temporary V0 skeleton behavior: real replanning will decide whether to
     # continue the investigation after later workflow chapters are implemented.
-    return {
-        "phase": "REPLANNING",
-        "investigation_complete": True,
-    }
+    return {"investigation_complete": True}
