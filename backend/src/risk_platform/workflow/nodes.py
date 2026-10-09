@@ -9,9 +9,9 @@ investigation_agent = InvestigationAgent()
 def initial_planning(state: InvestigationState) -> dict[str, object]:
     """Ask the Investigation Agent what the first round should investigate."""
 
-    result = investigation_agent.initial_plan(state["query"])
+    plan = investigation_agent.initial_plan(state["query"])
 
-    return {"investigation_needs": result}
+    return {"investigation_plan": plan}
 
 
 def task_execution(_: InvestigationState) -> dict[str, object]:
