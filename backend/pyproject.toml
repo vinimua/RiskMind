@@ -9,6 +9,8 @@ description = "Credit risk model monitoring and governed iteration platform"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi",
+  "langchain-openai",
+  "openai",
   "uvicorn[standard]",
   "pydantic-settings",
 ]

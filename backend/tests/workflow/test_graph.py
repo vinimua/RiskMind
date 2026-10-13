@@ -1,9 +1,17 @@
+import json
+import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 from pydantic import ValidationError
 
+# Workflow module initialization creates the real SDK client but these tests
+# replace every model call with a fake and never access the network.
+os.environ.setdefault("ZHIPU_API_KEY", "test-only-key")
+
+from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow import nodes
 from risk_platform.workflow.contracts import (
     CapabilityType,
@@ -17,25 +25,57 @@ from risk_platform.workflow.contracts import (
 from risk_platform.workflow.graph import build_investigation_graph
 
 
+class FakeCompletions:
+    def __init__(self, content: str):
+        self.content = content
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=self.content),
+                )
+            ]
+        )
+
+
+class FakeClient:
+    def __init__(self, content: str):
+        self.completions = FakeCompletions(content)
+        self.chat = SimpleNamespace(completions=self.completions)
+
+
+def _plan_json(capability: CapabilityType = CapabilityType.KNOWLEDGE_RETRIEVAL) -> str:
+    return json.dumps(
+        {
+            "goal": "建立当前异常的初始调查背景",
+            "tasks": [
+                {
+                    "objective": "检索历史类似异常案例及对应调查过程",
+                    "capability": capability.value,
+                    "expected_result": "获得历史相似异常和已有调查路径",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
 def _investigation_plan() -> InvestigationPlan:
     return InvestigationPlan(
         goal="调查 credit_v3 KS 下降原因",
-        hypotheses=["标签成熟度不足", "客群结构变化", "特征漂移"],
         tasks=[
             InvestigationTask(
-                objective="确认当前评估样本标签是否成熟",
-                capability=CapabilityType.COMPUTATION,
-                expected_result="得到当前标签成熟状态",
-            ),
-            InvestigationTask(
-                objective="确认近期是否发生模型或特征版本变化",
-                capability=CapabilityType.FACT_RETRIEVAL,
-                expected_result="得到当前版本和近期变更记录",
-            ),
-            InvestigationTask(
-                objective="搜索历史类似 KS 下降案例",
+                objective="检索历史 KS 下降异常案例及对应调查过程",
                 capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
-                expected_result="得到相关历史 Case 和已有调查经验",
+                expected_result="获得历史相似异常、常见影响因素以及已有调查路径",
+            ),
+            InvestigationTask(
+                objective="检索 credit_v3 的模型背景、已知限制和历史问题",
+                capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
+                expected_result="获得与当前 KS 异常相关的模型知识和历史经验",
             ),
         ],
     )
@@ -70,6 +110,106 @@ def _monitoring_alert() -> MonitoringAlert:
         reference_value=0.42,
         triggered_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
     )
+
+
+def test_investigation_agent_plans_user_query_knowledge_tasks() -> None:
+    client = FakeClient(_plan_json())
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+
+    plan = agent.initial_plan(_user_planning_input())
+
+    assert len(client.completions.calls) == 1
+    call = client.completions.calls[0]
+    assert call["model"] == "glm-4.7-flash"
+    assert call["response_format"] == {"type": "json_object"}
+    system_prompt = call["messages"][0]["content"]
+    assert "不生成 Hypothesis" in system_prompt
+    assert "只能创建 capability 为 KNOWLEDGE_RETRIEVAL" in system_prompt
+    assert "不得创建 FACT_RETRIEVAL 或 COMPUTATION" in system_prompt
+    assert "source = USER_QUERY" in call["messages"][1]["content"]
+    assert "query = 为什么 credit_v3 最近 KS 下降？" in call["messages"][1]["content"]
+    assert "model_id = credit_v3" in call["messages"][1]["content"]
+    assert "time_window = not provided" in call["messages"][1]["content"]
+    assert set(InvestigationPlan.model_fields) == {"goal", "tasks"}
+    assert all(
+        task.capability is CapabilityType.KNOWLEDGE_RETRIEVAL
+        for task in plan.tasks
+    )
+    assert str(UUID(plan.tasks[0].task_id)) == plan.tasks[0].task_id
+    assert plan.tasks[0].status is TaskStatus.PENDING
+
+
+def test_investigation_agent_plans_monitoring_alert_knowledge_tasks() -> None:
+    client = FakeClient(_plan_json())
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    alert = _monitoring_alert()
+    planning_input = InitialPlanningInput(
+        monitoring_alert=alert,
+        available_capabilities=_available_capabilities(),
+    )
+
+    plan = agent.initial_plan(planning_input)
+
+    context = client.completions.calls[0]["messages"][1]["content"]
+    assert "source = MONITORING_ALERT" in context
+    assert "source = USER_QUERY" not in context
+    assert "alert_id = ALERT-001" in context
+    assert "model_id = credit_v3" in context
+    assert "metric = KS" in context
+    assert "symptom = DEGRADATION" in context
+    assert "time_window = 2026-09" in context
+    assert "current_value = 0.31" in context
+    assert "reference_value = 0.42" in context
+    assert "triggered_at = 2026-10-01T00:00:00+00:00" in context
+    assert all(
+        task.capability is CapabilityType.KNOWLEDGE_RETRIEVAL
+        for task in plan.tasks
+    )
+
+
+def test_investigation_agent_requires_knowledge_retrieval_capability() -> None:
+    client = FakeClient(_plan_json())
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    planning_input = InitialPlanningInput(
+        user_query=UserQuery(query="为什么 KS 下降？"),
+        available_capabilities=[
+            CapabilityType.FACT_RETRIEVAL,
+            CapabilityType.COMPUTATION,
+        ],
+    )
+
+    with pytest.raises(ValueError, match="requires the KNOWLEDGE_RETRIEVAL"):
+        agent.initial_plan(planning_input)
+
+    assert client.completions.calls == []
+
+
+def test_investigation_agent_rejects_forbidden_task_capability() -> None:
+    client = FakeClient(_plan_json(CapabilityType.COMPUTATION))
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+
+    with pytest.raises(ValueError, match="forbidden task capabilities: COMPUTATION"):
+        agent.initial_plan(_user_planning_input())
+
+
+def test_investigation_agent_propagates_invalid_json_error() -> None:
+    client = FakeClient("not-json")
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+
+    with pytest.raises(ValidationError):
+        agent.initial_plan(_user_planning_input())
+
+
+def test_investigation_agent_rejects_empty_tasks() -> None:
+    content = json.dumps(
+        {"goal": "建立当前异常的初始调查背景", "tasks": []},
+        ensure_ascii=False,
+    )
+    client = FakeClient(content)
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+
+    with pytest.raises(ValueError, match="at least one task"):
+        agent.initial_plan(_user_planning_input())
 
 
 def test_initial_planning_input_accepts_user_query() -> None:
@@ -111,6 +251,16 @@ def test_investigation_task_defaults_are_system_managed() -> None:
 
     assert str(UUID(task.task_id)) == task.task_id
     assert task.status is TaskStatus.PENDING
+
+
+def test_investigation_plan_contains_only_goal_and_tasks() -> None:
+    plan = _investigation_plan()
+
+    assert set(InvestigationPlan.model_fields) == {"goal", "tasks"}
+    assert all(
+        task.capability is CapabilityType.KNOWLEDGE_RETRIEVAL
+        for task in plan.tasks
+    )
 
 
 def test_capability_types_round_trip_through_json() -> None:

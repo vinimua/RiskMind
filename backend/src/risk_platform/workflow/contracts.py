@@ -62,5 +62,4 @@ class InvestigationTask(BaseModel):
 
 class InvestigationPlan(BaseModel):
     goal: str
-    hypotheses: list[str]
     tasks: list[InvestigationTask]

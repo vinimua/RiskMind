@@ -1,9 +1,26 @@
 """Nodes for the V0 investigation workflow."""
 
+import os
+
+from openai import OpenAI
+
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow.state import InvestigationState
 
-investigation_agent = InvestigationAgent()
+_ZHIPU_API_KEY = os.environ.get("ZHIPU_API_KEY")
+if not _ZHIPU_API_KEY:
+    raise RuntimeError("ZHIPU_API_KEY is not set")
+
+investigation_agent = InvestigationAgent(
+    client=OpenAI(
+        api_key=_ZHIPU_API_KEY,
+        base_url=os.environ.get(
+            "ZHIPU_BASE_URL",
+            "https://open.bigmodel.cn/api/paas/v4/",
+        ),
+    ),
+    model=os.environ.get("ZHIPU_MODEL", "glm-4.7-flash"),
+)
 
 
 def initial_planning(state: InvestigationState) -> dict[str, object]:
