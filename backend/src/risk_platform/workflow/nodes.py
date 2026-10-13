@@ -1,16 +1,14 @@
 """Nodes for the V0 investigation workflow."""
 
 from risk_platform.agents.investigation import InvestigationAgent
-from risk_platform.core.llm import create_zhipu_client, get_zhipu_model
 from risk_platform.workflow.state import InvestigationState
 
-investigation_agent = InvestigationAgent(
-    client=create_zhipu_client(),
-    model=get_zhipu_model(),
-)
 
-
-def initial_planning(state: InvestigationState) -> dict[str, object]:
+def initial_planning(
+    state: InvestigationState,
+    *,
+    investigation_agent: InvestigationAgent,
+) -> dict[str, object]:
     """Ask the Investigation Agent what the first round should investigate."""
 
     plan = investigation_agent.initial_plan(state["planning_input"])

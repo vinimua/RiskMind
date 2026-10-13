@@ -1,10 +1,10 @@
 # 信贷风控模型异常调查与闭环处置系统
-## 技术开发框架文档 V1.2
+## 技术开发框架文档 V1.3
 
 **适用项目：** 信贷风控模型智能监测与自主迭代平台  
 **文档定位：** 系统总体框架基线  
-**版本：** V1.2  
-**日期：** 2026-10-08  
+**版本：** V1.3
+**日期：** 2026-10-13
 
 > **核心原则：先规划、后执行；先观察、后重规划；先证据、后根因；先门禁、后处置。**
 >
@@ -171,6 +171,10 @@ Validate
                             Knowledge Update
 ```
 
+上图的三类 Capability 表示完整调查循环的执行能力，不表示 Initial Planning 会同时生成
+三类任务。第一轮只进入 Knowledge Retrieval；Fact Retrieval 与 Evidence Computation 必须由
+取得 Observation 后的 Replanning 规划。
+
 # 4. Investigation Agent
 
 V1 不强制采用多 Agent。
@@ -181,12 +185,16 @@ V1 不强制采用多 Agent。
 
 其职责为：
 
-- 根据异常目标生成初始调查计划；
-- 维护候选 Hypothesis；
-- 根据 Investigation State 选择后续调查方向；
-- 根据 Observation 进行 Replanning；
+- 根据用户请求或监控告警生成第一轮知识检索计划；
+- 在获得 Observation 后形成和维护候选 Hypothesis；
+- 根据 Investigation State 选择后续调查方向并进行 Replanning；
 - 判断是否还需要继续调查；
 - 在调查结束时提交给 Policy Gate，而不是自行确认根因。
+
+Initial Planning 与 Replanning 的职责不同：
+
+- Initial Planning 只定义第一轮需要获取哪些历史知识，不产生 Hypothesis；
+- Replanning 才能根据已经取得的 Observation 形成 Hypothesis，并规划事实检索或证据计算。
 
 Investigation Agent 不负责：
 
@@ -203,60 +211,81 @@ V1 暂不拆分 Knowledge Agent、Fact Agent、Data Agent、Feature Agent 等子
 
 # 5. Initial Planning
 
-调查开始后，Investigation Agent 首先生成 `InvestigationPlan`。
-
-输入：
+调查开始后，Investigation Agent 首先生成 `InvestigationPlan`。当前输入由
+`InitialPlanningInput` 统一承载，来源必须且只能有一个：
 
 ```text
-query / alert
-model_id
-metric / symptom
-time_window
-baseline
-current_context
-available_capabilities
+InitialPlanningInput
+├── user_query?              ─┐
+├── monitoring_alert?        ─┴─ XOR
+└── available_capabilities[]
 ```
 
-输出：
+用户请求的最小结构为：
+
+```text
+UserQuery
+├── query
+├── model_id?
+└── time_window?
+```
+
+监控告警的最小结构为：
+
+```text
+MonitoringAlert
+├── alert_id
+├── model_id
+├── metric
+├── symptom
+├── time_window
+├── current_value
+├── reference_value
+└── triggered_at
+```
+
+Initial Planning 输出的正式业务对象为：
 
 ```text
 InvestigationPlan
 ├── goal
-├── hypotheses[]
-├── tasks[]
-├── dependencies[]
-├── priorities[]
-├── stop_conditions[]
-└── max_rounds
+└── tasks[]
 ```
 
-示例：
+第一轮任务全部为 `KNOWLEDGE_RETRIEVAL`，用于获取形成后续判断所需的历史背景。例如：
 
 ```text
 Goal:
-调查 credit_v3 KS 下降原因
-
-Hypotheses:
-H1 标签成熟度不足
-H2 数据质量异常
-H3 客群结构变化
-H4 特征漂移
-H5 模型/特征版本异常
+建立 credit_v3 KS 下降异常的初始调查背景
 
 Tasks:
-T1 检查标签成熟度
-T2 检查模型和特征版本
-T3 搜索历史相似 Case
-T4 检查数据质量
-T5 比较渠道/客群结构
-T6 检查关键特征漂移
+T1 搜索历史类似 KS 下降案例及调查过程
+T2 获取 credit_v3 的模型背景、已知限制和历史问题
 ```
 
-Initial Planning 只负责：
+LLM 输出不得直接反序列化为正式 `InvestigationTask`。Agent 内部使用严格的 Draft Schema：
 
-> **定义要调查什么。**
+```text
+_InitialPlanDraft
+├── goal
+└── tasks[]
+    ├── objective
+    └── expected_result
+```
 
-不直接给出根因结论。
+Draft 禁止额外字段。系统将 Draft 转换为正式任务，并负责设置：
+
+```text
+task_id = UUID
+capability = KNOWLEDGE_RETRIEVAL
+status = PENDING
+```
+
+因此 Initial Planning 只负责：
+
+> **定义第一轮需要获取什么历史知识。**
+
+不直接给出根因、Hypothesis、事实判断或计算结果。
 
 # 6. Investigation Task 与 Capability
 
@@ -267,14 +296,21 @@ InvestigationTask
 ├── task_id
 ├── objective
 ├── capability
-├── candidate_tools[]
-├── depends_on[]
 ├── expected_result
-├── priority
 └── status
 ```
 
+其中 Agent 规划 `objective` 与 `expected_result`；`task_id`、`capability` 和 `status`
+由系统在 Draft 转正式任务时设置。当前未确认 `candidate_tools`、`depends_on`、`priority`
+等字段，不进入当前契约。
+
 V1 任务可选择三类执行能力。
+
+阶段约束：
+
+- Initial Planning 只生成 `KNOWLEDGE_RETRIEVAL`；
+- Replanning 在已有 Observation 后，才可以规划 `FACT_RETRIEVAL` 或 `COMPUTATION`；
+- Capability 是任务执行语义，不代表独立子 Agent。
 
 ## 6.1 Knowledge Retrieval
 
@@ -358,6 +394,9 @@ compare_score_distribution()
 
 Investigation Agent 不直接访问底层系统。
 
+当前代码中的 `task_execution` 仍是 V0 placeholder，尚未实现 Capability Router、Tool
+Registry 或任何真实工具调用。以下内容是下一阶段的目标边界，而不是已实现功能。
+
 Task Execution 通过 Tool Registry 执行。
 
 流程：
@@ -396,6 +435,9 @@ V1 不允许 Agent 自由拼接 SQL、Shell 或任意代码。
 # 8. Observation 与 Investigation State
 
 Task Execution 后的结果不统一直接叫 Evidence。
+
+当前代码中的 `observation` 仍是 V0 placeholder，尚未定义正式 Observation 契约。实现时
+必须保持工具原始结果、Observation 与正式 Evidence 三种语义分离。
 
 不同能力输出保持不同语义：
 
@@ -441,24 +483,25 @@ FACT
 COMPUTATION
 ```
 
-Observation 更新 `InvestigationState`：
+当前 V0 已实现的最小 `InvestigationState` 为：
 
 ```text
 InvestigationState
-├── current_plan
-├── hypotheses[]
-├── completed_tasks[]
-├── pending_tasks[]
-├── observations[]
-├── evidence_refs[]
-├── round
-├── budget
-└── stop_status
+├── planning_input
+├── investigation_plan?
+└── investigation_complete?
 ```
+
+后续实现 Task Execution、Observation 和 Replanning 时，再依据已经确认的跨节点数据扩展
+State；Graph 节点阶段不重复保存为 State 字段。
 
 # 9. Replanning
 
 Replanning 是本系统使用 ReAct 思想的核心位置。
+
+当前代码中的 `replanning` 仍是结束 V0 骨架的 placeholder。目标流程中，第一次 Replanning
+发生在知识检索 Observation 产生之后；Hypothesis 从这里开始形成，而不是由 Initial Planning
+预先生成。
 
 它的输入不是单独的 Evidence，而是完整：
 
@@ -467,7 +510,7 @@ Replanning 是本系统使用 ReAct 思想的核心位置。
 包括：
 
 - 当前 Plan；
-- 已有 Hypothesis；
+- 已有 Hypothesis（第一轮 Replanning 前可以为空）；
 - KnowledgeHit；
 - FactResult；
 - ComputationResult；
@@ -478,11 +521,11 @@ Replanning 是本系统使用 ReAct 思想的核心位置。
 
 Replanning 可以：
 
-- 调整 Hypothesis 优先级；
+- 根据 KnowledgeHit 或其他 Observation 形成 Hypothesis；
+- 调整已有 Hypothesis 的调查顺序；
 - 删除已被否决的方向；
 - 增加新的 Hypothesis；
 - 追加新的调查任务；
-- 修改任务优先级；
 - 判断是否已有足够信息进入 Evidence Qualification；
 - 判断是否需要人工接管。
 
@@ -491,19 +534,19 @@ Replanning 可以：
 ```text
 第一轮 Observation：
 
-标签成熟 = YES
-版本异常 = NO
-Channel C 占比明显增加
+历史相似 Case 显示：KS 下降常与标签成熟度、客群迁移和版本变更有关
+模型开发报告显示：credit_v3 对 Channel C 的稳定性有限
 
 Replanning：
 
-H1 标签问题 → 降低优先级
-H5 版本问题 → 降低优先级
-H3 客群迁移 → 提高优先级
+形成 H1：当前评估样本标签可能未成熟
+形成 H2：近期客群结构可能发生变化
+形成 H3：模型或特征版本可能发生变化
 
 新增：
-T7 计算 Channel C KS
-T8 计算关键特征 PSI
+T3 检索当前模型与特征版本（FACT_RETRIEVAL）
+T4 计算标签成熟状态（COMPUTATION）
+T5 比较渠道与客群结构（COMPUTATION）
 ```
 
 因此 Replanning 回答的是：

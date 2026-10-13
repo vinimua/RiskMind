@@ -1,6 +1,7 @@
 """Investigation Agent for the first investigation-planning round."""
 
 from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field
 
 from risk_platform.agents.prompts import (
     INITIAL_PLANNING_SYSTEM_PROMPT,
@@ -10,7 +11,22 @@ from risk_platform.workflow.contracts import (
     CapabilityType,
     InitialPlanningInput,
     InvestigationPlan,
+    InvestigationTask,
 )
+
+
+class _InitialTaskDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    objective: str
+    expected_result: str
+
+
+class _InitialPlanDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str
+    tasks: list[_InitialTaskDraft] = Field(min_length=1)
 
 
 class InvestigationAgent:
@@ -48,19 +64,15 @@ class InvestigationAgent:
         if not content:
             raise ValueError("初始计划生成失败,模型没有返回任何内容")
 
-        plan = InvestigationPlan.model_validate_json(content)
-        if not plan.tasks:
-            raise ValueError("初始计划生成必须返回至少一个任务,但模型返回了空任务列表")
-
-        invalid_capabilities = {
-            task.capability
-            for task in plan.tasks
-            if task.capability is not CapabilityType.KNOWLEDGE_RETRIEVAL
-        }
-        if invalid_capabilities:
-            values = ", ".join(sorted(capability.value for capability in invalid_capabilities))
-            raise ValueError(
-                "初始计划生成返回了禁止的任务能力: " + values
-            )
-
-        return plan
+        draft = _InitialPlanDraft.model_validate_json(content)
+        return InvestigationPlan(
+            goal=draft.goal,
+            tasks=[
+                InvestigationTask(
+                    objective=task.objective,
+                    capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
+                    expected_result=task.expected_result,
+                )
+                for task in draft.tasks
+            ],
+        )

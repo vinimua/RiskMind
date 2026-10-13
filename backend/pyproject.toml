@@ -9,7 +9,7 @@ description = "Credit risk model monitoring and governed iteration platform"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi",
-  "langchain-openai",
+  "langgraph",
   "openai",
   "uvicorn[standard]",
   "pydantic-settings",
@@ -17,7 +17,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "httpx"]
-workflow = ["langgraph", "langgraph-checkpoint-postgres"]
 database = ["sqlalchemy", "alembic", "psycopg[binary]"]
 worker = ["celery[redis]"]
 modelops = ["mlflow"]
