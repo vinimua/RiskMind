@@ -178,7 +178,7 @@ def test_investigation_agent_requires_knowledge_retrieval_capability() -> None:
         ],
     )
 
-    with pytest.raises(ValueError, match="requires the KNOWLEDGE_RETRIEVAL"):
+    with pytest.raises(ValueError, match="需要 KNOWLEDGE_RETRIEVAL 能力"):
         agent.initial_plan(planning_input)
 
     assert client.completions.calls == []
@@ -188,7 +188,7 @@ def test_investigation_agent_rejects_forbidden_task_capability() -> None:
     client = FakeClient(_plan_json(CapabilityType.COMPUTATION))
     agent = InvestigationAgent(client=client, model="glm-4.7-flash")
 
-    with pytest.raises(ValueError, match="forbidden task capabilities: COMPUTATION"):
+    with pytest.raises(ValueError, match="禁止的任务能力: COMPUTATION"):
         agent.initial_plan(_user_planning_input())
 
 
@@ -208,7 +208,7 @@ def test_investigation_agent_rejects_empty_tasks() -> None:
     client = FakeClient(content)
     agent = InvestigationAgent(client=client, model="glm-4.7-flash")
 
-    with pytest.raises(ValueError, match="at least one task"):
+    with pytest.raises(ValueError, match="至少一个任务"):
         agent.initial_plan(_user_planning_input())
 
 
