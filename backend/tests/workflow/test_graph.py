@@ -1,11 +1,18 @@
+from datetime import datetime, timezone
 from uuid import UUID
+
+import pytest
+from pydantic import ValidationError
 
 from risk_platform.workflow import nodes
 from risk_platform.workflow.contracts import (
     CapabilityType,
+    InitialPlanningInput,
     InvestigationPlan,
     InvestigationTask,
+    MonitoringAlert,
     TaskStatus,
+    UserQuery,
 )
 from risk_platform.workflow.graph import build_investigation_graph
 
@@ -34,6 +41,71 @@ def _investigation_plan() -> InvestigationPlan:
     )
 
 
+def _available_capabilities() -> list[CapabilityType]:
+    return [
+        CapabilityType.KNOWLEDGE_RETRIEVAL,
+        CapabilityType.FACT_RETRIEVAL,
+        CapabilityType.COMPUTATION,
+    ]
+
+
+def _user_planning_input() -> InitialPlanningInput:
+    return InitialPlanningInput(
+        user_query=UserQuery(
+            query="为什么 credit_v3 最近 KS 下降？",
+            model_id="credit_v3",
+        ),
+        available_capabilities=_available_capabilities(),
+    )
+
+
+def _monitoring_alert() -> MonitoringAlert:
+    return MonitoringAlert(
+        alert_id="ALERT-001",
+        model_id="credit_v3",
+        metric="KS",
+        symptom="DEGRADATION",
+        time_window="2026-09",
+        current_value=0.31,
+        reference_value=0.42,
+        triggered_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_initial_planning_input_accepts_user_query() -> None:
+    planning_input = _user_planning_input()
+
+    assert planning_input.user_query is not None
+    assert planning_input.user_query.model_id == "credit_v3"
+    assert planning_input.monitoring_alert is None
+
+
+def test_initial_planning_input_accepts_monitoring_alert() -> None:
+    alert = _monitoring_alert()
+
+    planning_input = InitialPlanningInput(
+        monitoring_alert=alert,
+        available_capabilities=_available_capabilities(),
+    )
+
+    assert planning_input.monitoring_alert == alert
+    assert planning_input.user_query is None
+
+
+def test_initial_planning_input_rejects_missing_source() -> None:
+    with pytest.raises(ValidationError):
+        InitialPlanningInput(available_capabilities=_available_capabilities())
+
+
+def test_initial_planning_input_rejects_multiple_sources() -> None:
+    with pytest.raises(ValidationError):
+        InitialPlanningInput(
+            user_query=UserQuery(query="为什么 KS 下降？"),
+            monitoring_alert=_monitoring_alert(),
+            available_capabilities=_available_capabilities(),
+        )
+
+
 def test_investigation_task_defaults_are_system_managed() -> None:
     task = _investigation_plan().tasks[0]
 
@@ -55,19 +127,19 @@ def test_capability_types_round_trip_through_json() -> None:
 
 
 def test_initial_planning_delegates_to_investigation_agent(monkeypatch) -> None:
-    received_queries: list[str] = []
+    received_inputs: list[InitialPlanningInput] = []
+    planning_input = _user_planning_input()
     plan = _investigation_plan()
 
-    def fake_initial_plan(query: str) -> InvestigationPlan:
-        received_queries.append(query)
+    def fake_initial_plan(value: InitialPlanningInput) -> InvestigationPlan:
+        received_inputs.append(value)
         return plan
 
     monkeypatch.setattr(nodes.investigation_agent, "initial_plan", fake_initial_plan)
-    query = "Investigate a model monitoring anomaly"
 
-    result = nodes.initial_planning({"query": query})
+    result = nodes.initial_planning({"planning_input": planning_input})
 
-    assert received_queries == [query]
+    assert received_inputs == [planning_input]
     assert result["investigation_plan"] == plan
 
 
@@ -78,19 +150,19 @@ def test_investigation_graph_compiles() -> None:
 
 
 def test_investigation_graph_runs_to_v0_completion(monkeypatch) -> None:
+    planning_input = _user_planning_input()
     plan = _investigation_plan()
     monkeypatch.setattr(
         nodes.investigation_agent,
         "initial_plan",
-        lambda query: plan,
+        lambda value: plan,
     )
     graph = build_investigation_graph()
-    query = "Investigate a model monitoring anomaly"
 
-    result = graph.invoke({"query": query})
+    result = graph.invoke({"planning_input": planning_input})
 
     assert result == {
-        "query": query,
+        "planning_input": planning_input,
         "investigation_plan": plan,
         "investigation_complete": True,
     }

@@ -9,7 +9,7 @@ investigation_agent = InvestigationAgent()
 def initial_planning(state: InvestigationState) -> dict[str, object]:
     """Ask the Investigation Agent what the first round should investigate."""
 
-    plan = investigation_agent.initial_plan(state["query"])
+    plan = investigation_agent.initial_plan(state["planning_input"])
 
     return {"investigation_plan": plan}
 
