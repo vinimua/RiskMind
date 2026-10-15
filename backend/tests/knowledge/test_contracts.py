@@ -12,14 +12,23 @@ from risk_platform.knowledge.contracts import (
 )
 
 
-def _hit(*, chunk_id: str = "chunk-001", rank: int = 1) -> KnowledgeHit:
+def _hit(
+    *,
+    document_id: str = "document-001",
+    chunk_id: str = "chunk-001",
+    rank: int = 1,
+    model_id: str | None = "credit_v3",
+    case_id: str | None = "CASE-2026-018",
+) -> KnowledgeHit:
     return KnowledgeHit(
         source=KnowledgeSourceRef(
-            document_id="document-001",
+            document_id=document_id,
             document_version="v1",
             chunk_id=chunk_id,
         ),
         document_type=KnowledgeDocumentType.INCIDENT_REPORT,
+        model_id=model_id,
+        case_id=case_id,
         title="credit_v3 KS 下降调查",
         section_path="调查过程/标签成熟度",
         content="T+30 标签成熟后 KS 恢复。",
@@ -68,21 +77,65 @@ def test_search_request_rejects_an_empty_query() -> None:
         KnowledgeSearchRequest(query="", top_k=5)
 
 
+def test_search_request_rejects_a_whitespace_only_query() -> None:
+    with pytest.raises(ValidationError):
+        KnowledgeSearchRequest(query="   ", top_k=5)
+
+
+@pytest.mark.parametrize("field", ["document_id", "document_version", "chunk_id"])
+def test_source_reference_rejects_whitespace_only_ids(field: str) -> None:
+    values = {
+        "document_id": "document-001",
+        "document_version": "v1",
+        "chunk_id": "chunk-001",
+    }
+    values[field] = "   "
+
+    with pytest.raises(ValidationError):
+        KnowledgeSourceRef.model_validate(values)
+
+
+@pytest.mark.parametrize("field", ["model_id", "case_id", "document_version"])
+def test_filters_reject_whitespace_only_ids(field: str) -> None:
+    with pytest.raises(ValidationError):
+        KnowledgeFilters.model_validate({field: "   "})
+
+
 def test_knowledge_hit_has_one_source_reference_and_no_pipeline_scores() -> None:
     hit = _hit()
 
     assert set(KnowledgeHit.model_fields) == {
         "source",
         "document_type",
+        "model_id",
+        "case_id",
         "title",
         "section_path",
         "content",
         "rank",
     }
     assert hit.source.chunk_id == "chunk-001"
+    assert hit.model_id == "credit_v3"
+    assert hit.case_id == "CASE-2026-018"
 
     with pytest.raises(ValidationError):
         KnowledgeHit.model_validate({**hit.model_dump(), "dense_score": 0.91})
+
+
+@pytest.mark.parametrize("field", ["model_id", "case_id", "title", "content"])
+def test_knowledge_hit_rejects_whitespace_only_values(field: str) -> None:
+    values = _hit().model_dump()
+    values[field] = "   "
+
+    with pytest.raises(ValidationError):
+        KnowledgeHit.model_validate(values)
+
+
+def test_knowledge_hit_allows_an_empty_section_path() -> None:
+    values = _hit().model_dump()
+    values["section_path"] = ""
+
+    assert KnowledgeHit.model_validate(values).section_path == ""
 
 
 def test_successful_result_can_express_no_relevant_knowledge() -> None:
@@ -102,6 +155,28 @@ def test_retrieval_result_round_trips_ranked_hits_through_json() -> None:
 
     assert restored == result
     assert restored.hits[0].document_type is KnowledgeDocumentType.INCIDENT_REPORT
+    assert restored.hits[0].model_id == "credit_v3"
+    assert restored.hits[0].case_id == "CASE-2026-018"
+
+
+def test_validation_does_not_strip_content() -> None:
+    values = _hit().model_dump()
+    values["content"] = "  T+30 标签成熟后 KS 恢复。  "
+
+    hit = KnowledgeHit.model_validate(values)
+
+    assert hit.content == "  T+30 标签成熟后 KS 恢复。  "
+
+
+def test_result_rejects_same_chunk_id_from_different_documents() -> None:
+    with pytest.raises(ValidationError):
+        KnowledgeRetrievalResult(
+            status=RetrievalStatus.SUCCEEDED,
+            hits=[
+                _hit(document_id="document-001", rank=1),
+                _hit(document_id="document-002", rank=2),
+            ],
+        )
 
 
 @pytest.mark.parametrize(

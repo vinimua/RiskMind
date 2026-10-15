@@ -1,9 +1,18 @@
 """Stable domain contracts for knowledge retrieval."""
 
 from enum import StrEnum
-from typing import Self
+from typing import Annotated, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+
+
+def _validate_non_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("value must not be blank")
+    return value
+
+
+_NonBlankString = Annotated[str, AfterValidator(_validate_non_blank)]
 
 
 class KnowledgeDocumentType(StrEnum):
@@ -19,24 +28,24 @@ class RetrievalStatus(StrEnum):
 class KnowledgeSourceRef(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    document_id: str = Field(min_length=1)
-    document_version: str = Field(min_length=1)
-    chunk_id: str = Field(min_length=1)
+    document_id: _NonBlankString
+    document_version: _NonBlankString
+    chunk_id: _NonBlankString
 
 
 class KnowledgeFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document_types: list[KnowledgeDocumentType] = Field(default_factory=list)
-    model_id: str | None = None
-    case_id: str | None = None
-    document_version: str | None = None
+    model_id: _NonBlankString | None = None
+    case_id: _NonBlankString | None = None
+    document_version: _NonBlankString | None = None
 
 
 class KnowledgeSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    query: str = Field(min_length=1)
+    query: _NonBlankString
     filters: KnowledgeFilters = Field(default_factory=KnowledgeFilters)
     top_k: int = Field(gt=0)
 
@@ -46,9 +55,11 @@ class KnowledgeHit(BaseModel):
 
     source: KnowledgeSourceRef
     document_type: KnowledgeDocumentType
-    title: str = Field(min_length=1)
+    model_id: _NonBlankString | None = None
+    case_id: _NonBlankString | None = None
+    title: _NonBlankString
     section_path: str
-    content: str = Field(min_length=1)
+    content: _NonBlankString
     rank: int = Field(gt=0)
 
 
