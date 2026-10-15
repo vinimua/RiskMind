@@ -257,6 +257,18 @@ def test_dense_search_returns_metadata_and_uses_contract_filters() -> None:
     ]
 
 
+def test_dense_search_uses_active_alias_and_expands_ef_for_large_top_k() -> None:
+    client = FakeMilvusClient()
+
+    assert milvus.dense_search(client, _vector(), top_k=100) == []
+
+    assert client.search_calls[0]["collection"] == milvus.ACTIVE_COLLECTION_ALIAS
+    assert client.search_calls[0]["search_params"] == {
+        "metric_type": "COSINE",
+        "params": {"ef": 100},
+    }
+
+
 @pytest.mark.parametrize(
     ("vector", "top_k", "error"),
     [

@@ -11,7 +11,7 @@ from risk_platform.knowledge.embeddings import EMBEDDING_DIMENSION
 
 
 DEFAULT_MILVUS_URI = "http://localhost:19530"
-DEFAULT_COLLECTION = "riskmind_knowledge_v001"
+ACTIVE_COLLECTION_ALIAS = "riskmind_knowledge_active"
 
 CONTENT_ANALYZER = {"tokenizer": "icu", "filter": ["lowercase"]}
 DENSE_SEARCH_EF = 64
@@ -47,9 +47,9 @@ def get_client(uri: str | None = None) -> MilvusClient:
 
 def ensure_collection(
     client: MilvusClient,
-    collection: str = DEFAULT_COLLECTION,
+    collection: str,
 ) -> None:
-    """Idempotently create and load the frozen knowledge collection schema."""
+    """Create the frozen schema if absent; otherwise load without migration."""
 
     if client is _CLIENT and collection in _ENSURED_COLLECTIONS:
         return
@@ -134,7 +134,7 @@ def ensure_collection(
 def upsert_chunks(
     client: MilvusClient,
     rows: list[dict[str, Any]],
-    collection: str = DEFAULT_COLLECTION,
+    collection: str,
 ) -> None:
     if rows:
         client.upsert(collection, rows)
@@ -142,7 +142,7 @@ def upsert_chunks(
 
 def flush(
     client: MilvusClient,
-    collection: str = DEFAULT_COLLECTION,
+    collection: str,
 ) -> None:
     client.flush(collection)
 
@@ -152,7 +152,7 @@ def dense_search(
     vector: list[float],
     top_k: int,
     filters: KnowledgeFilters | None = None,
-    collection: str = DEFAULT_COLLECTION,
+    collection: str = ACTIVE_COLLECTION_ALIAS,
 ) -> list[dict[str, Any]]:
     """Search one dense vector and return metadata plus its cosine score."""
 
@@ -171,7 +171,7 @@ def dense_search(
         output_fields=OUTPUT_FIELDS,
         search_params={
             "metric_type": "COSINE",
-            "params": {"ef": DENSE_SEARCH_EF},
+            "params": {"ef": max(DENSE_SEARCH_EF, top_k)},
         },
         filter=_filter_expression(filters),
     )
