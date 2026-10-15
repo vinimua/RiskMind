@@ -10,20 +10,34 @@ def _vector(dimension: int = embeddings.EMBEDDING_DIMENSION) -> list[float]:
 
 
 class FakeEmbeddings:
-    def __init__(self, vectors: list[list[float]]):
+    def __init__(
+        self,
+        vectors: list[list[float]],
+        *,
+        indices: list[int | None] | None = None,
+    ):
         self.vectors = vectors
+        self.indices = indices if indices is not None else list(range(len(vectors)))
         self.calls: list[dict] = []
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
-            data=[SimpleNamespace(embedding=vector) for vector in self.vectors]
+            data=[
+                SimpleNamespace(embedding=vector, index=index)
+                for vector, index in zip(self.vectors, self.indices, strict=True)
+            ]
         )
 
 
 class FakeOpenAIClient:
-    def __init__(self, vectors: list[list[float]]):
-        self.embeddings = FakeEmbeddings(vectors)
+    def __init__(
+        self,
+        vectors: list[list[float]],
+        *,
+        indices: list[int | None] | None = None,
+    ):
+        self.embeddings = FakeEmbeddings(vectors, indices=indices)
 
 
 def test_create_embedding_client_uses_environment(monkeypatch) -> None:
@@ -35,7 +49,7 @@ def test_create_embedding_client_uses_environment(monkeypatch) -> None:
 
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
     monkeypatch.setenv("SILICONFLOW_BASE_URL", "https://example.test/v1")
-    monkeypatch.setenv("SILICONFLOW_EMBEDDING_MODEL", "example/embedding-model")
+    monkeypatch.setenv("SILICONFLOW_EMBEDDING_MODEL", "another-model")
     monkeypatch.setattr(embeddings, "OpenAI", fake_openai)
 
     embedding_client = embeddings.create_embedding_client()
@@ -44,7 +58,7 @@ def test_create_embedding_client_uses_environment(monkeypatch) -> None:
         "api_key": "test-key",
         "base_url": "https://example.test/v1",
     }
-    assert embedding_client.model == "example/embedding-model"
+    assert embedding_client.model == embeddings.EMBEDDING_MODEL
 
 
 def test_create_embedding_client_uses_frozen_defaults(monkeypatch) -> None:
@@ -56,13 +70,12 @@ def test_create_embedding_client_uses_frozen_defaults(monkeypatch) -> None:
 
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
     monkeypatch.delenv("SILICONFLOW_BASE_URL", raising=False)
-    monkeypatch.delenv("SILICONFLOW_EMBEDDING_MODEL", raising=False)
     monkeypatch.setattr(embeddings, "OpenAI", fake_openai)
 
     embedding_client = embeddings.create_embedding_client()
 
     assert received["base_url"] == embeddings.DEFAULT_SILICONFLOW_BASE_URL
-    assert embedding_client.model == embeddings.DEFAULT_SILICONFLOW_EMBEDDING_MODEL
+    assert embedding_client.model == embeddings.EMBEDDING_MODEL
     assert embeddings.EMBEDDING_DIMENSION == 1024
 
 
@@ -73,11 +86,14 @@ def test_create_embedding_client_requires_api_key(monkeypatch) -> None:
         embeddings.create_embedding_client()
 
 
-def test_embed_texts_calls_api_and_preserves_response_order() -> None:
+def test_embed_texts_calls_api_and_restores_input_order_from_indices() -> None:
     first_vector = _vector()
     second_vector = _vector()
     second_vector[0] = 0.2
-    client = FakeOpenAIClient([first_vector, second_vector])
+    client = FakeOpenAIClient(
+        [second_vector, first_vector],
+        indices=[1, 0],
+    )
     embedding_client = embeddings.EmbeddingClient(
         client=client,
         model="BAAI/bge-m3",
@@ -151,3 +167,40 @@ def test_embed_texts_rejects_a_response_count_mismatch() -> None:
 
     with pytest.raises(ValueError, match="response count"):
         embedding_client.embed_texts(["第一个片段", "第二个片段"])
+
+
+@pytest.mark.parametrize(
+    ("indices", "error"),
+    [
+        ([None, 1], "invalid index"),
+        ([0, 0], "duplicate index"),
+        ([0, 2], "invalid index"),
+    ],
+)
+def test_embed_texts_rejects_invalid_response_indices(
+    indices: list[int | None],
+    error: str,
+) -> None:
+    client = FakeOpenAIClient([_vector(), _vector()], indices=indices)
+    embedding_client = embeddings.EmbeddingClient(
+        client=client,
+        model="BAAI/bge-m3",
+    )
+
+    with pytest.raises(ValueError, match=error):
+        embedding_client.embed_texts(["第一个片段", "第二个片段"])
+
+
+def test_embed_texts_propagates_provider_errors() -> None:
+    class FailingEmbeddings:
+        def create(self, **kwargs):
+            raise RuntimeError("provider unavailable")
+
+    client = SimpleNamespace(embeddings=FailingEmbeddings())
+    embedding_client = embeddings.EmbeddingClient(
+        client=client,
+        model="BAAI/bge-m3",
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        embedding_client.embed_texts(["模型开发报告"])

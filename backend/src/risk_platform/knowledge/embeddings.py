@@ -6,7 +6,7 @@ from openai import OpenAI
 
 
 DEFAULT_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
-DEFAULT_SILICONFLOW_EMBEDDING_MODEL = "BAAI/bge-m3"
+EMBEDDING_MODEL = "BAAI/bge-m3"
 EMBEDDING_DIMENSION = 1024
 
 
@@ -28,12 +28,30 @@ class EmbeddingClient:
             input=texts,
             encoding_format="float",
         )
-        vectors = [item.embedding for item in response.data]
-
-        if len(vectors) != len(texts):
+        if len(response.data) != len(texts):
             raise ValueError(
                 "embedding response count does not match the input text count"
             )
+
+        vectors_by_index: dict[int, list[float]] = {}
+        for item in response.data:
+            index = getattr(item, "index", None)
+            if (
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= len(texts)
+            ):
+                raise ValueError("embedding response contains an invalid index")
+            if index in vectors_by_index:
+                raise ValueError("embedding response contains a duplicate index")
+            vectors_by_index[index] = item.embedding
+
+        expected_indices = set(range(len(texts)))
+        if set(vectors_by_index) != expected_indices:
+            raise ValueError("embedding response does not cover every input index")
+
+        vectors = [vectors_by_index[index] for index in range(len(texts))]
         if any(len(vector) != EMBEDDING_DIMENSION for vector in vectors):
             raise ValueError(
                 f"embedding response must contain {EMBEDDING_DIMENSION}-dimensional vectors"
@@ -59,8 +77,4 @@ def create_embedding_client() -> EmbeddingClient:
             DEFAULT_SILICONFLOW_BASE_URL,
         ),
     )
-    model = os.environ.get(
-        "SILICONFLOW_EMBEDDING_MODEL",
-        DEFAULT_SILICONFLOW_EMBEDDING_MODEL,
-    )
-    return EmbeddingClient(client=client, model=model)
+    return EmbeddingClient(client=client, model=EMBEDDING_MODEL)
