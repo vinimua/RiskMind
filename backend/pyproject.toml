@@ -20,6 +20,7 @@ dev = ["pytest", "httpx"]
 database = ["sqlalchemy", "alembic", "psycopg[binary]"]
 worker = ["celery[redis]"]
 modelops = ["mlflow"]
+knowledge = ["pymilvus==2.6.17"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
