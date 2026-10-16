@@ -39,7 +39,6 @@ def test_collection_upsert_flush_and_dense_search() -> None:
             "section_path": "调查过程/标签成熟度",
             "content": "T+30 标签成熟后 KS 恢复。",
             "model_id": "credit_v3",
-            "case_id": "CASE-2026-018",
             "dense_vector": _vector(0),
         },
         {
@@ -51,7 +50,6 @@ def test_collection_upsert_flush_and_dense_search() -> None:
             "section_path": "调查过程/数据质量",
             "content": "修复缺失数据源后 KS 恢复。",
             "model_id": "credit_v2",
-            "case_id": None,
             "dense_vector": _vector(1),
         },
     ]

@@ -1,7 +1,9 @@
-"""Milvus read-model access for RiskMind knowledge chunks."""
 
+import asyncio
+import functools
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pymilvus import DataType, Function, FunctionType, MilvusClient
@@ -25,11 +27,21 @@ OUTPUT_FIELDS = [
     "section_path",
     "content",
     "model_id",
-    "case_id",
 ]
 
 _CLIENT: MilvusClient | None = None
 _ENSURED_COLLECTIONS: set[str] = set()
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="milvus")
+
+
+async def acall(fn, *args, **kwargs):
+    """Run one synchronous Milvus operation on its dedicated thread."""
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _EXECUTOR,
+        functools.partial(fn, *args, **kwargs),
+    )
 
 
 def get_client(uri: str | None = None) -> MilvusClient:
@@ -78,12 +90,6 @@ def ensure_collection(
         )
         schema.add_field(
             "model_id",
-            DataType.VARCHAR,
-            max_length=128,
-            nullable=True,
-        )
-        schema.add_field(
-            "case_id",
             DataType.VARCHAR,
             max_length=128,
             nullable=True,
@@ -195,8 +201,12 @@ def _filter_expression(filters: KnowledgeFilters | None) -> str:
     if filters.document_types:
         values = [document_type.value for document_type in filters.document_types]
         clauses.append(f"document_type in {json.dumps(values)}")
-    for field in ("model_id", "case_id", "document_version"):
+    for field in ("document_id", "model_id", "document_version"):
         value = getattr(filters, field)
         if value is not None:
             clauses.append(f"{field} == {json.dumps(value, ensure_ascii=False)}")
     return " and ".join(clauses)
+# 先限定：
+# CASE-2026-018 + credit_v3 + 指定版本 + 事故报告
+# 再在限定范围内：
+# 执行 Dense COSINE 检索

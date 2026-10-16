@@ -1,8 +1,7 @@
-"""SiliconFlow embedding access for the knowledge module."""
 
 import os
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 
 DEFAULT_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1"
@@ -13,17 +12,17 @@ EMBEDDING_DIMENSION = 1024
 class EmbeddingClient:
     """Create and validate embeddings used by the Milvus read model."""
 
-    def __init__(self, *, client: OpenAI, model: str):
+    def __init__(self, *, client: AsyncOpenAI, model: str):
         self.client = client
         self.model = model
 
-    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         if any(not text.strip() for text in texts):
             raise ValueError("embedding input must not contain blank text")
 
-        response = self.client.embeddings.create(
+        response = await self.client.embeddings.create(
             model=self.model,
             input=texts,
             encoding_format="float",
@@ -59,22 +58,31 @@ class EmbeddingClient:
 
         return vectors
 
-    def embed_query(self, query: str) -> list[float]:
-        return self.embed_texts([query])[0]
+    async def embed_query(self, query: str) -> list[float]:
+        return (await self.embed_texts([query]))[0]
 
 
-def create_embedding_client() -> EmbeddingClient:
-    """Create the configured SiliconFlow embedding client."""
+_CLIENT: EmbeddingClient | None = None
 
+"""直连嵌入上游(硅基流动的 bge-m3,OpenAI 兼容)。
+    进程内单例:复用同一 httpx 连接池,避免每次 embed 新建客户端累积连接/fd。"""
+def get_embedding_client() -> EmbeddingClient:
+
+    global _CLIENT
+    if _CLIENT is not None:
+        return _CLIENT
     api_key = os.environ.get("SILICONFLOW_API_KEY")
     if not api_key:
         raise RuntimeError("SILICONFLOW_API_KEY is not set")
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url=os.environ.get(
-            "SILICONFLOW_BASE_URL",
-            DEFAULT_SILICONFLOW_BASE_URL,
+    _CLIENT = EmbeddingClient(
+        client=AsyncOpenAI(
+            api_key=api_key,
+            base_url=os.environ.get(
+                "SILICONFLOW_BASE_URL",
+                DEFAULT_SILICONFLOW_BASE_URL,
+            ),
         ),
+        model=EMBEDDING_MODEL,
     )
-    return EmbeddingClient(client=client, model=EMBEDDING_MODEL)
+    return _CLIENT

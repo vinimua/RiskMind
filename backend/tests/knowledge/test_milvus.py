@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,44 @@ def _vector(axis: int = 0) -> list[float]:
     vector = [0.0] * milvus.EMBEDDING_DIMENSION
     vector[axis] = 1.0
     return vector
+
+
+def test_acall_uses_one_dedicated_milvus_thread() -> None:
+    async def run_calls() -> list[str]:
+        return await asyncio.gather(
+            *(milvus.acall(lambda: threading.current_thread().name) for _ in range(3))
+        )
+
+    thread_names = asyncio.run(run_calls())
+
+    assert len(set(thread_names)) == 1
+    assert thread_names[0].startswith("milvus")
+
+
+def test_acall_creates_and_reuses_client_on_the_dedicated_thread(
+    monkeypatch,
+) -> None:
+    created_on: list[str] = []
+
+    def fake_client(*, uri: str):
+        created_on.append(threading.current_thread().name)
+        return SimpleNamespace(uri=uri)
+
+    async def run_calls():
+        def work():
+            return milvus.get_client(), threading.current_thread().name
+
+        return await asyncio.gather(milvus.acall(work), milvus.acall(work))
+
+    monkeypatch.setattr(milvus, "_CLIENT", None)
+    monkeypatch.setattr(milvus, "MilvusClient", fake_client)
+
+    first, second = asyncio.run(run_calls())
+
+    assert first[0] is second[0]
+    assert first[1] == second[1]
+    assert first[1].startswith("milvus")
+    assert created_on == [first[1]]
 
 
 class FakeSchema:
@@ -135,7 +175,6 @@ def test_ensure_collection_creates_the_frozen_schema_and_indexes() -> None:
         "section_path",
         "content",
         "model_id",
-        "case_id",
         "dense_vector",
         "sparse_vector",
     ]
@@ -143,7 +182,6 @@ def test_ensure_collection_creates_the_frozen_schema_and_indexes() -> None:
     assert fields["content"]["analyzer_params"] == milvus.CONTENT_ANALYZER
     assert fields["dense_vector"]["dim"] == 1024
     assert fields["model_id"]["nullable"] is True
-    assert fields["case_id"]["nullable"] is True
     assert len(client.schema.functions) == 1
     assert client.indexes.values == [
         {
@@ -217,13 +255,12 @@ def test_dense_search_returns_metadata_and_uses_contract_filters() -> None:
         "section_path": "调查过程/标签成熟度",
         "content": "T+30 标签成熟后 KS 恢复。",
         "model_id": "credit_v3",
-        "case_id": "CASE-2026-018",
     }
     client.search_results = [[{"distance": 0.93, "entity": entity}]]
     filters = KnowledgeFilters(
         document_types=[KnowledgeDocumentType.INCIDENT_REPORT],
+        document_id="document-001",
         model_id="credit_v3",
-        case_id="CASE-2026-018",
         document_version="v1",
     )
 
@@ -249,8 +286,8 @@ def test_dense_search_returns_metadata_and_uses_contract_filters() -> None:
             },
             "filter": (
                 'document_type in ["INCIDENT_REPORT"]'
+                ' and document_id == "document-001"'
                 ' and model_id == "credit_v3"'
-                ' and case_id == "CASE-2026-018"'
                 ' and document_version == "v1"'
             ),
         }

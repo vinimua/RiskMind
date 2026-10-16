@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +21,7 @@ class FakeEmbeddings:
         self.indices = indices if indices is not None else list(range(len(vectors)))
         self.calls: list[dict] = []
 
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
             data=[
@@ -40,7 +41,7 @@ class FakeOpenAIClient:
         self.embeddings = FakeEmbeddings(vectors, indices=indices)
 
 
-def test_create_embedding_client_uses_environment(monkeypatch) -> None:
+def test_get_embedding_client_uses_environment_and_reuses_client(monkeypatch) -> None:
     received: dict[str, str] = {}
 
     def fake_openai(*, api_key: str, base_url: str):
@@ -50,18 +51,21 @@ def test_create_embedding_client_uses_environment(monkeypatch) -> None:
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
     monkeypatch.setenv("SILICONFLOW_BASE_URL", "https://example.test/v1")
     monkeypatch.setenv("SILICONFLOW_EMBEDDING_MODEL", "another-model")
-    monkeypatch.setattr(embeddings, "OpenAI", fake_openai)
+    monkeypatch.setattr(embeddings, "_CLIENT", None)
+    monkeypatch.setattr(embeddings, "AsyncOpenAI", fake_openai)
 
-    embedding_client = embeddings.create_embedding_client()
+    embedding_client = embeddings.get_embedding_client()
+    reused_client = embeddings.get_embedding_client()
 
     assert received == {
         "api_key": "test-key",
         "base_url": "https://example.test/v1",
     }
     assert embedding_client.model == embeddings.EMBEDDING_MODEL
+    assert reused_client is embedding_client
 
 
-def test_create_embedding_client_uses_frozen_defaults(monkeypatch) -> None:
+def test_get_embedding_client_uses_frozen_defaults(monkeypatch) -> None:
     received: dict[str, str] = {}
 
     def fake_openai(*, api_key: str, base_url: str):
@@ -70,20 +74,22 @@ def test_create_embedding_client_uses_frozen_defaults(monkeypatch) -> None:
 
     monkeypatch.setenv("SILICONFLOW_API_KEY", "test-key")
     monkeypatch.delenv("SILICONFLOW_BASE_URL", raising=False)
-    monkeypatch.setattr(embeddings, "OpenAI", fake_openai)
+    monkeypatch.setattr(embeddings, "_CLIENT", None)
+    monkeypatch.setattr(embeddings, "AsyncOpenAI", fake_openai)
 
-    embedding_client = embeddings.create_embedding_client()
+    embedding_client = embeddings.get_embedding_client()
 
     assert received["base_url"] == embeddings.DEFAULT_SILICONFLOW_BASE_URL
     assert embedding_client.model == embeddings.EMBEDDING_MODEL
     assert embeddings.EMBEDDING_DIMENSION == 1024
 
 
-def test_create_embedding_client_requires_api_key(monkeypatch) -> None:
+def test_get_embedding_client_requires_api_key(monkeypatch) -> None:
+    monkeypatch.setattr(embeddings, "_CLIENT", None)
     monkeypatch.delenv("SILICONFLOW_API_KEY", raising=False)
 
     with pytest.raises(RuntimeError, match="SILICONFLOW_API_KEY is not set"):
-        embeddings.create_embedding_client()
+        embeddings.get_embedding_client()
 
 
 def test_embed_texts_calls_api_and_restores_input_order_from_indices() -> None:
@@ -99,7 +105,9 @@ def test_embed_texts_calls_api_and_restores_input_order_from_indices() -> None:
         model="BAAI/bge-m3",
     )
 
-    vectors = embedding_client.embed_texts(["第一个片段", "第二个片段"])
+    vectors = asyncio.run(
+        embedding_client.embed_texts(["第一个片段", "第二个片段"])
+    )
 
     assert vectors == [first_vector, second_vector]
     assert client.embeddings.calls == [
@@ -119,7 +127,7 @@ def test_embed_query_returns_the_only_vector() -> None:
         model="BAAI/bge-m3",
     )
 
-    assert embedding_client.embed_query("credit_v3 KS 下降") == vector
+    assert asyncio.run(embedding_client.embed_query("credit_v3 KS 下降")) == vector
 
 
 def test_embed_texts_returns_empty_without_calling_api() -> None:
@@ -129,7 +137,7 @@ def test_embed_texts_returns_empty_without_calling_api() -> None:
         model="BAAI/bge-m3",
     )
 
-    assert embedding_client.embed_texts([]) == []
+    assert asyncio.run(embedding_client.embed_texts([])) == []
     assert client.embeddings.calls == []
 
 
@@ -142,7 +150,7 @@ def test_embed_texts_rejects_blank_text(text: str) -> None:
     )
 
     with pytest.raises(ValueError, match="must not contain blank text"):
-        embedding_client.embed_texts([text])
+        asyncio.run(embedding_client.embed_texts([text]))
 
     assert client.embeddings.calls == []
 
@@ -155,7 +163,7 @@ def test_embed_texts_rejects_an_unexpected_vector_dimension() -> None:
     )
 
     with pytest.raises(ValueError, match="1024-dimensional"):
-        embedding_client.embed_texts(["模型开发报告"])
+        asyncio.run(embedding_client.embed_texts(["模型开发报告"]))
 
 
 def test_embed_texts_rejects_a_response_count_mismatch() -> None:
@@ -166,7 +174,9 @@ def test_embed_texts_rejects_a_response_count_mismatch() -> None:
     )
 
     with pytest.raises(ValueError, match="response count"):
-        embedding_client.embed_texts(["第一个片段", "第二个片段"])
+        asyncio.run(
+            embedding_client.embed_texts(["第一个片段", "第二个片段"])
+        )
 
 
 @pytest.mark.parametrize(
@@ -188,12 +198,14 @@ def test_embed_texts_rejects_invalid_response_indices(
     )
 
     with pytest.raises(ValueError, match=error):
-        embedding_client.embed_texts(["第一个片段", "第二个片段"])
+        asyncio.run(
+            embedding_client.embed_texts(["第一个片段", "第二个片段"])
+        )
 
 
 def test_embed_texts_propagates_provider_errors() -> None:
     class FailingEmbeddings:
-        def create(self, **kwargs):
+        async def create(self, **kwargs):
             raise RuntimeError("provider unavailable")
 
     client = SimpleNamespace(embeddings=FailingEmbeddings())
@@ -203,4 +215,4 @@ def test_embed_texts_propagates_provider_errors() -> None:
     )
 
     with pytest.raises(RuntimeError, match="provider unavailable"):
-        embedding_client.embed_texts(["模型开发报告"])
+        asyncio.run(embedding_client.embed_texts(["模型开发报告"]))

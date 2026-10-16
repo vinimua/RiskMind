@@ -26,6 +26,8 @@ class RetrievalStatus(StrEnum):
 
 
 class KnowledgeSourceRef(BaseModel):
+    """Stable source identity; incident reports use the investigation Case ID."""
+
     model_config = ConfigDict(extra="forbid")
 
     document_id: _NonBlankString
@@ -37,8 +39,8 @@ class KnowledgeFilters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     document_types: list[KnowledgeDocumentType] = Field(default_factory=list)
+    document_id: _NonBlankString | None = None
     model_id: _NonBlankString | None = None
-    case_id: _NonBlankString | None = None
     document_version: _NonBlankString | None = None
 
 
@@ -56,7 +58,6 @@ class KnowledgeHit(BaseModel):
     source: KnowledgeSourceRef
     document_type: KnowledgeDocumentType
     model_id: _NonBlankString | None = None
-    case_id: _NonBlankString | None = None
     title: _NonBlankString
     section_path: str
     content: _NonBlankString
