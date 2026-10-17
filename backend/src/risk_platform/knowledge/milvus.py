@@ -27,6 +27,9 @@ OUTPUT_FIELDS = [
     "section_path",
     "content",
     "model_id",
+    "source_uri",
+    "page_start",
+    "page_end",
 ]
 
 _CLIENT: MilvusClient | None = None
@@ -94,6 +97,9 @@ def ensure_collection(
             max_length=128,
             nullable=True,
         )
+        schema.add_field("source_uri", DataType.VARCHAR, max_length=2048)
+        schema.add_field("page_start", DataType.INT64, nullable=True)
+        schema.add_field("page_end", DataType.INT64, nullable=True)
         schema.add_field(
             "dense_vector",
             DataType.FLOAT_VECTOR,

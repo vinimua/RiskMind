@@ -175,6 +175,9 @@ def test_ensure_collection_creates_the_frozen_schema_and_indexes() -> None:
         "section_path",
         "content",
         "model_id",
+        "source_uri",
+        "page_start",
+        "page_end",
         "dense_vector",
         "sparse_vector",
     ]
@@ -182,6 +185,9 @@ def test_ensure_collection_creates_the_frozen_schema_and_indexes() -> None:
     assert fields["content"]["analyzer_params"] == milvus.CONTENT_ANALYZER
     assert fields["dense_vector"]["dim"] == 1024
     assert fields["model_id"]["nullable"] is True
+    assert fields["source_uri"] == {"max_length": 2048}
+    assert fields["page_start"] == {"nullable": True}
+    assert fields["page_end"] == {"nullable": True}
     assert len(client.schema.functions) == 1
     assert client.indexes.values == [
         {
@@ -255,6 +261,9 @@ def test_dense_search_returns_metadata_and_uses_contract_filters() -> None:
         "section_path": "调查过程/标签成熟度",
         "content": "T+30 标签成熟后 KS 恢复。",
         "model_id": "credit_v3",
+        "source_uri": "minio://riskmind/cases/CASE-2026-018.pdf",
+        "page_start": 7,
+        "page_end": 8,
     }
     client.search_results = [[{"distance": 0.93, "entity": entity}]]
     filters = KnowledgeFilters(

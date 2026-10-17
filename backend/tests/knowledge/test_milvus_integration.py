@@ -39,6 +39,9 @@ def test_collection_upsert_flush_and_dense_search() -> None:
             "section_path": "调查过程/标签成熟度",
             "content": "T+30 标签成熟后 KS 恢复。",
             "model_id": "credit_v3",
+            "source_uri": "minio://riskmind/cases/CASE-2026-018.pdf",
+            "page_start": 7,
+            "page_end": 8,
             "dense_vector": _vector(0),
         },
         {
@@ -50,6 +53,9 @@ def test_collection_upsert_flush_and_dense_search() -> None:
             "section_path": "调查过程/数据质量",
             "content": "修复缺失数据源后 KS 恢复。",
             "model_id": "credit_v2",
+            "source_uri": "knowledge://cases/CASE-2025-009",
+            "page_start": None,
+            "page_end": None,
             "dense_vector": _vector(1),
         },
     ]
@@ -71,6 +77,10 @@ def test_collection_upsert_flush_and_dense_search() -> None:
         assert [hit["chunk_id"] for hit in hits] == ["chunk-credit-v3"]
         assert hits[0]["document_id"] == "document-001"
         assert hits[0]["model_id"] == "credit_v3"
+        assert hits[0]["source_uri"] == (
+            "minio://riskmind/cases/CASE-2026-018.pdf"
+        )
+        assert (hits[0]["page_start"], hits[0]["page_end"]) == (7, 8)
         assert hits[0]["score"] == pytest.approx(1.0)
     finally:
         if client.has_collection(collection):
