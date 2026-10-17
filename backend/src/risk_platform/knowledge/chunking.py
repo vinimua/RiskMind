@@ -15,12 +15,17 @@ from risk_platform.knowledge.contracts import KnowledgeDocumentType
 DEFAULT_CHUNK_SIZE = 400
 DEFAULT_CHUNK_OVERLAP = 60
 DEFAULT_TABLE_MAX_ROWS = 10
+CHUNKING_SCHEME_VERSION = "v1"
 
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
+_HEADING_NUMBER_RE = re.compile(r"^\d+(?:\.\d+)*[.)、]?[ \t]+")
 _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _HORIZONTAL_RULE_RE = re.compile(r"^\s{0,3}(?:-{3,}|\*{3,}|_{3,})\s*$")
 _SENTENCE_RE = re.compile(r"[^。！？!?…\n]*[。！？!?…\n]+|[^。！？!?…\n]+$")
 _PROSE_SEPARATORS = ("\n\n", "\n", "。", "！", "？", "!", "?", "；", ";", "，", ",", " ")
+_STABLE_URI_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://\S+$")
+_EXCLUDED_SECTION_TITLES = frozenset({"修订历史", "目录", "文档说明"})
 
 
 def _validate_non_blank(value: str) -> str:
@@ -30,6 +35,16 @@ def _validate_non_blank(value: str) -> str:
 
 
 _NonBlankString = Annotated[str, AfterValidator(_validate_non_blank)]
+
+
+def _validate_source_uri(value: str) -> str:
+    value = _validate_non_blank(value)
+    if not _STABLE_URI_RE.fullmatch(value) or value.lower().startswith("file://"):
+        raise ValueError("source_uri must be a stable non-file URI")
+    return value
+
+
+_StableSourceUri = Annotated[str, AfterValidator(_validate_source_uri)]
 
 
 class DocumentPage(BaseModel):
@@ -50,7 +65,7 @@ class KnowledgeDocument(BaseModel):
     document_version: _NonBlankString
     document_type: KnowledgeDocumentType
     title: _NonBlankString
-    source_uri: _NonBlankString
+    source_uri: _StableSourceUri
     model_id: _NonBlankString | None = None
     pages: tuple[DocumentPage, ...] = Field(min_length=1)
 
@@ -78,7 +93,7 @@ class KnowledgeChunk(BaseModel):
     section_path: str
     content: _NonBlankString
     model_id: _NonBlankString | None = None
-    source_uri: _NonBlankString
+    source_uri: _StableSourceUri
     page_start: int | None = Field(default=None, gt=0)
     page_end: int | None = Field(default=None, gt=0)
 
@@ -106,7 +121,7 @@ class _Section:
 
 @dataclass(frozen=True)
 class _Block:
-    kind: Literal["prose", "table"]
+    kind: Literal["prose", "table", "code"]
     lines: tuple[_SourceLine, ...]
 
 
@@ -123,14 +138,25 @@ class _Piece:
     page_end: int | None
 
 
-def chunk_document(
+def chunk_document(document: KnowledgeDocument) -> list[KnowledgeChunk]:
+    """Apply the frozen V1 chunking scheme without calling an LLM."""
+
+    return _chunk_document_v1(
+        document,
+        chunk_size=DEFAULT_CHUNK_SIZE,
+        overlap=DEFAULT_CHUNK_OVERLAP,
+        table_max_rows=DEFAULT_TABLE_MAX_ROWS,
+    )
+
+
+def _chunk_document_v1(
     document: KnowledgeDocument,
     *,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    overlap: int = DEFAULT_CHUNK_OVERLAP,
-    table_max_rows: int = DEFAULT_TABLE_MAX_ROWS,
+    chunk_size: int,
+    overlap: int,
+    table_max_rows: int,
 ) -> list[KnowledgeChunk]:
-    """Split one document deterministically without calling an LLM."""
+    """Configurable V1 implementation used only by focused algorithm tests."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -139,19 +165,20 @@ def chunk_document(
     if table_max_rows <= 0:
         raise ValueError("table_max_rows must be positive")
 
-    pending: list[tuple[str, str, _Piece]] = []
+    pending: list[tuple[str, _Piece]] = []
     for section in _split_sections(document):
         section_path = " / ".join(section.path)
-        title = section.path[-1] if section.path else document.title
         for block in _split_blocks(section.lines):
             if block.kind == "table":
-                pieces = _split_table(block.lines, table_max_rows)
+                pieces = _split_table(block.lines, table_max_rows, chunk_size)
+            elif block.kind == "code":
+                pieces = [_atomic_code_piece(block.lines, chunk_size)]
             else:
                 pieces = _split_prose(block.lines, chunk_size, overlap)
-            pending.extend((title, section_path, piece) for piece in pieces)
+            pending.extend((section_path, piece) for piece in pieces)
 
     chunks: list[KnowledgeChunk] = []
-    for index, (title, section_path, piece) in enumerate(pending):
+    for index, (section_path, piece) in enumerate(pending):
         chunks.append(
             KnowledgeChunk(
                 chunk_id=_stable_chunk_id(
@@ -163,7 +190,7 @@ def chunk_document(
                 document_id=document.document_id,
                 document_type=document.document_type,
                 document_version=document.document_version,
-                title=title,
+                title=document.title,
                 section_path=section_path,
                 content=piece.content,
                 model_id=document.model_id,
@@ -181,23 +208,33 @@ def _split_sections(document: KnowledgeDocument) -> list[_Section]:
     current_path: tuple[str, ...] = ()
     current_lines: list[_SourceLine] = []
     fence: str | None = None
+    document_heading_seen = False
 
     def flush() -> None:
         nonlocal current_lines
-        if _has_meaningful_content(current_lines):
+        if (
+            _has_meaningful_content(current_lines)
+            and not _is_excluded_section(current_path)
+        ):
             sections.append(_Section(path=current_path, lines=tuple(current_lines)))
         current_lines = []
 
     for page in document.pages:
-        for raw_line in page.content.splitlines():
+        page_content = _HTML_COMMENT_RE.sub("", page.content)
+        for raw_line in page_content.splitlines():
             fence_match = _FENCE_RE.match(raw_line)
             if fence is None:
                 heading_match = _HEADING_RE.match(raw_line)
                 if heading_match is not None:
                     flush()
                     level = len(heading_match.group(1))
+                    if level == 1 and not document_heading_seen:
+                        document_heading_seen = True
+                        headings = {}
+                        current_path = ()
+                        continue
                     headings = {key: value for key, value in headings.items() if key < level}
-                    headings[level] = heading_match.group(2).strip()
+                    headings[level] = _normalize_heading(heading_match.group(2))
                     current_path = tuple(headings[key] for key in sorted(headings))
                     continue
 
@@ -216,8 +253,18 @@ def _split_sections(document: KnowledgeDocument) -> list[_Section]:
                     in_fence=in_fence,
                 )
             )
+    if fence is not None:
+        raise ValueError("document contains an unclosed fenced code block")
     flush()
     return sections
+
+
+def _normalize_heading(title: str) -> str:
+    return _HEADING_NUMBER_RE.sub("", title.strip())
+
+
+def _is_excluded_section(path: tuple[str, ...]) -> bool:
+    return any(part in _EXCLUDED_SECTION_TITLES for part in path)
 
 
 def _has_meaningful_content(lines: list[_SourceLine]) -> bool:
@@ -239,6 +286,20 @@ def _split_blocks(lines: tuple[_SourceLine, ...]) -> list[_Block]:
         prose = []
 
     while index < len(lines):
+        fence_match = _FENCE_RE.match(lines[index].text)
+        if fence_match is not None and lines[index].in_fence:
+            flush_prose()
+            delimiter = fence_match.group(1)[0]
+            code = [lines[index]]
+            index += 1
+            while index < len(lines):
+                code.append(lines[index])
+                closing = _FENCE_RE.match(lines[index].text)
+                index += 1
+                if closing is not None and closing.group(1)[0] == delimiter:
+                    break
+            blocks.append(_Block(kind="code", lines=tuple(code)))
+            continue
         if _starts_table(lines, index):
             flush_prose()
             table = [lines[index], lines[index + 1]]
@@ -277,16 +338,41 @@ def _is_table_separator(line: str) -> bool:
     )
 
 
-def _split_table(lines: tuple[_SourceLine, ...], max_rows: int) -> list[_Piece]:
+def _split_table(
+    lines: tuple[_SourceLine, ...], max_rows: int, chunk_size: int
+) -> list[_Piece]:
     header = lines[:2]
     rows = lines[2:]
+    if len(_piece_from_lines(header).content) > chunk_size:
+        raise ValueError("table header exceeds chunk_size")
     if not rows:
         return [_piece_from_lines(header)]
 
-    pieces = []
-    for start in range(0, len(rows), max_rows):
-        pieces.append(_piece_from_lines((*header, *rows[start : start + max_rows])))
+    pieces: list[_Piece] = []
+    group: list[_SourceLine] = []
+    for row in rows:
+        one_row = _piece_from_lines((*header, row))
+        if len(one_row.content) > chunk_size:
+            raise ValueError("table header plus one row exceeds chunk_size")
+
+        candidate = _piece_from_lines((*header, *group, row))
+        if group and (len(group) >= max_rows or len(candidate.content) > chunk_size):
+            pieces.append(_piece_from_lines((*header, *group)))
+            group = [row]
+        else:
+            group.append(row)
+    if group:
+        pieces.append(_piece_from_lines((*header, *group)))
     return pieces
+
+
+def _atomic_code_piece(
+    lines: tuple[_SourceLine, ...], chunk_size: int
+) -> _Piece:
+    piece = _piece_from_lines(lines)
+    if len(piece.content) > chunk_size:
+        raise ValueError("fenced code block exceeds chunk_size")
+    return piece
 
 
 def _split_prose(
@@ -295,7 +381,8 @@ def _split_prose(
     overlap: int,
 ) -> list[_Piece]:
     annotated = _join_lines(lines)
-    ranges = _recursive_ranges(annotated.text, 0, len(annotated.text), chunk_size, 0)
+    body_size = chunk_size - overlap
+    ranges = _recursive_ranges(annotated.text, 0, len(annotated.text), body_size, 0)
     pieces: list[_Piece] = []
     for index, current in enumerate(ranges):
         source_ranges = [current]
@@ -314,6 +401,8 @@ def _split_prose(
         content_parts.append(annotated.text[slice(*current)])
         content = "".join(content_parts).strip()
         if content and not _HORIZONTAL_RULE_RE.fullmatch(content):
+            if len(content) > chunk_size:
+                raise AssertionError("prose chunk exceeds the configured chunk_size")
             page_start, page_end = _page_span(annotated.pages, source_ranges)
             pieces.append(
                 _Piece(content=content, page_start=page_start, page_end=page_end)
@@ -416,10 +505,11 @@ def _trailing_sentence_range(
     for match in reversed(matches):
         if not match.group().strip():
             continue
-        if selected and total + len(match.group()) > max_chars:
+        sentence_length = len(match.group())
+        if sentence_length > max_chars or total + sentence_length > max_chars:
             break
         selected.insert(0, match)
-        total += len(match.group())
+        total += sentence_length
     if not selected:
         return None
     return _trim_range(text, selected[0].start(), selected[-1].end())
@@ -470,6 +560,7 @@ def _stable_chunk_id(
 ) -> str:
     payload = "\x1f".join(
         (
+            CHUNKING_SCHEME_VERSION,
             document.document_id,
             document.document_version,
             str(index),

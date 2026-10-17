@@ -1,8 +1,9 @@
 # credit_v3 模型开发报告（Synthetic Fixture）
 
-> 文档类型：`MODEL_DEVELOPMENT_REPORT`  
-> 文档用途：RiskMind Stage 4 文档切块与检索测试样本。  
-> 重要说明：本文档中的业务数据、模型指标、样本规模、特征名称及结果均为**模拟数据（synthetic data）**，仅用于开发和测试，不代表真实生产模型。
+<!--
+Synthetic fixture for RiskMind tests. Not production data.
+Document type: MODEL_DEVELOPMENT_REPORT.
+-->
 
 ---
 

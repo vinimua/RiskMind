@@ -1,8 +1,9 @@
 # credit_v3 模型异常调查报告（Synthetic Fixture）
 
-> 文档类型：`INCIDENT_REPORT`  
-> 文档用途：RiskMind Stage 4 文档切块、知识检索和历史 Case 检索测试样本。  
-> 重要说明：本文档中的 Case、指标、时间、样本量、调查结论和处置结果均为**模拟数据（synthetic data）**，仅用于开发和测试，不代表真实生产事件。
+<!--
+Synthetic fixture for RiskMind tests. Not production data.
+Document type: INCIDENT_REPORT.
+-->
 
 ---
 
