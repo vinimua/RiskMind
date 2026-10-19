@@ -1,3 +1,11 @@
 # 数据库迁移
 
-在创建首个持久化业务对象时初始化 Alembic，不预置尚未确认的数据表。迁移需支持升级验证与回滚演练。
+Stage 5A 初始化正式 Alembic 配置，并创建 `knowledge_chunks`。
+
+```powershell
+$env:RISK_DATABASE_URL="postgresql+psycopg://risk_dev:...@localhost:5432/risk_platform"
+alembic -c alembic.ini upgrade head
+alembic -c alembic.ini downgrade base
+```
+
+迁移必须支持升级验证与回滚演练；应用运行时不调用 `create_all()`。
