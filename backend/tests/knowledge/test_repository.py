@@ -10,6 +10,7 @@ from risk_platform.knowledge.repository import (
     DocumentVersionConflictError,
     count_by_status,
     list_pending_chunks,
+    list_rebuild_chunks,
     mark_chunks_ready,
     stage_chunks,
 )
@@ -179,6 +180,25 @@ def test_list_pending_chunks_is_limited_and_does_not_commit() -> None:
 
     with pytest.raises(ValueError, match="positive"):
         asyncio.run(list_pending_chunks(session, limit=0))
+
+
+def test_rebuild_listing_pages_pending_and_ready_without_committing() -> None:
+    row = _row(_chunk("002"), status=IngestionStatus.READY)
+    session = _session(_Result(rows=[row]))
+
+    assert asyncio.run(
+        list_rebuild_chunks(session, limit=2, after_chunk_id="chunk-001")
+    ) == [row]
+    statement = session.execute.await_args.args[0]
+    compiled = statement.compile()
+    assert "ingestion_status IN" in str(compiled)
+    assert "chunk_id >" in str(compiled)
+    assert ["PENDING", "READY"] in compiled.params.values()
+    assert "chunk-001" in compiled.params.values()
+    session.commit.assert_not_awaited()
+
+    with pytest.raises(ValueError, match="positive"):
+        asyncio.run(list_rebuild_chunks(session, limit=0))
 
 
 def test_mark_ready_and_count_do_not_commit() -> None:

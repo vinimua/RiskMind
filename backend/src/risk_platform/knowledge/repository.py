@@ -134,6 +134,29 @@ async def list_pending_chunks(
     return list(result.scalars())
 
 
+async def list_rebuild_chunks(
+    session: AsyncSession,
+    *,
+    limit: int,
+    after_chunk_id: str | None = None,
+) -> list[KnowledgeChunkRow]:
+    """Page through all authoritative chunks without changing their status."""
+
+    if limit <= 0:
+        raise ValueError("limit must be positive")
+    statement = select(KnowledgeChunkRow).where(
+        KnowledgeChunkRow.ingestion_status.in_(
+            (IngestionStatus.PENDING.value, IngestionStatus.READY.value)
+        )
+    )
+    if after_chunk_id is not None:
+        statement = statement.where(KnowledgeChunkRow.chunk_id > after_chunk_id)
+    result = await session.execute(
+        statement.order_by(KnowledgeChunkRow.chunk_id).limit(limit)
+    )
+    return list(result.scalars())
+
+
 async def mark_chunks_ready(
     session: AsyncSession,
     chunk_ids: Sequence[str],
