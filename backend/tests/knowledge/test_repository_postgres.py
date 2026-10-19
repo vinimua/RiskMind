@@ -114,3 +114,80 @@ def test_repository_transactions_and_document_version_immutability() -> None:
     if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_exercise_repository())
+
+
+async def _exercise_concurrent_stage(*, different_content: bool) -> None:
+    engine = create_async_engine(os.environ["RISK_DATABASE_URL"])
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    document_id = f"stage5a-concurrent-{uuid4()}"
+    original = _chunk(document_id, "001")
+    competing = (
+        original.model_copy(update={"content": "different content"})
+        if different_content
+        else original
+    )
+    first_staged = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first_writer() -> int:
+        async with session_factory() as session:
+            async with session.begin():
+                staged = await stage_chunks(session, [original])
+                first_staged.set()
+                await release_first.wait()
+                return staged
+
+    async def second_writer() -> int:
+        await first_staged.wait()
+        async with session_factory() as session:
+            async with session.begin():
+                second_started.set()
+                return await stage_chunks(session, [competing])
+
+    first_task = asyncio.create_task(first_writer())
+    second_task = asyncio.create_task(second_writer())
+    try:
+        await asyncio.wait_for(second_started.wait(), timeout=5)
+        done, _ = await asyncio.wait({second_task}, timeout=0.2)
+        assert not done, "second writer must wait for the first transaction"
+        release_first.set()
+        assert await asyncio.wait_for(first_task, timeout=5) == 1
+        if different_content:
+            with pytest.raises(DocumentVersionConflictError, match="is immutable"):
+                await asyncio.wait_for(second_task, timeout=5)
+        else:
+            assert await asyncio.wait_for(second_task, timeout=5) == 0
+
+        async with session_factory() as session:
+            rows = list(
+                (
+                    await session.execute(
+                        select(KnowledgeChunkRow).where(
+                            KnowledgeChunkRow.document_id == document_id
+                        )
+                    )
+                ).scalars()
+            )
+            assert len(rows) == 1
+            assert rows[0].content == original.content
+    finally:
+        release_first.set()
+        await asyncio.gather(first_task, second_task, return_exceptions=True)
+        async with session_factory() as session:
+            async with session.begin():
+                await session.execute(
+                    delete(KnowledgeChunkRow).where(
+                        KnowledgeChunkRow.document_id == document_id
+                    )
+                )
+        await engine.dispose()
+
+
+@pytest.mark.parametrize("different_content", [False, True])
+def test_concurrent_stage_serializes_document_version(
+    different_content: bool,
+) -> None:
+    if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    asyncio.run(_exercise_concurrent_stage(different_content=different_content))

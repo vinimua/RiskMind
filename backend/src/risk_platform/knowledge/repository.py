@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from risk_platform.knowledge.chunking import KnowledgeChunk
@@ -65,6 +65,12 @@ async def stage_chunks(
         raise ValueError("chunk_id values must be unique within a document version")
 
     document_id, document_version = next(iter(document_keys))
+    # Serialize all writers of one document version before reading its chunks.
+    # This lock belongs to the caller's transaction and releases on commit/rollback.
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+        {"lock_key": f"riskmind:knowledge:{document_id}:{document_version}"},
+    )
     result = await session.execute(
         select(KnowledgeChunkRow)
         .where(

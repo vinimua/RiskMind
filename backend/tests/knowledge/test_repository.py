@@ -85,6 +85,12 @@ def test_stage_chunks_adds_one_document_as_pending_without_committing() -> None:
     assert [row.chunk_id for row in rows] == ["chunk-001", "chunk-002"]
     assert all(row.ingestion_status == IngestionStatus.PENDING.value for row in rows)
     session.flush.assert_awaited_once_with()
+    assert session.execute.await_count == 2
+    lock_statement, lock_parameters = session.execute.await_args_list[0].args
+    assert "pg_advisory_xact_lock" in str(lock_statement)
+    assert lock_parameters == {
+        "lock_key": "riskmind:knowledge:MODEL-DEV-credit_v3:v1"
+    }
     session.commit.assert_not_awaited()
     session.rollback.assert_not_awaited()
 
@@ -100,6 +106,7 @@ def test_identical_document_version_is_idempotent_and_ready_does_not_regress() -
     staged = asyncio.run(stage_chunks(session, chunks))
 
     assert staged == 0
+    assert session.execute.await_count == 2
     session.add_all.assert_not_called()
     session.flush.assert_not_awaited()
     assert existing[0].ingestion_status == IngestionStatus.READY.value
@@ -155,7 +162,7 @@ def test_different_document_version_uses_an_independent_stage_query() -> None:
     session = _session(_Result())
 
     assert asyncio.run(stage_chunks(session, [_chunk("v2", document_version="v2")])) == 1
-    statement = session.execute.await_args.args[0]
+    statement = session.execute.await_args_list[1].args[0]
     parameters = statement.compile().params
 
     assert "MODEL-DEV-credit_v3" in parameters.values()
