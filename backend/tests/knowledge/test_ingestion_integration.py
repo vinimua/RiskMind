@@ -72,6 +72,18 @@ async def _exercise_ingestion(monkeypatch: pytest.MonkeyPatch) -> None:
             ).scalar_one()
             assert row.ingestion_status == IngestionStatus.PENDING.value
 
+        def read_milvus():
+            return milvus.dense_search(
+                milvus.get_client(),
+                [1.0] + [0.0] * 1023,
+                top_k=1,
+                collection=collection,
+            )
+
+        hits_before_retry = await milvus.acall(read_milvus)
+        assert len(hits_before_retry) == 1
+        assert hits_before_retry[0]["chunk_id"] == chunk.chunk_id
+
         assert await ingest_pending(
             collection=collection,
             session_factory=sessions,
@@ -93,14 +105,6 @@ async def _exercise_ingestion(monkeypatch: pytest.MonkeyPatch) -> None:
             ).scalar_one()
             assert row.ingestion_status == IngestionStatus.READY.value
             assert row.ready_at is not None
-
-        def read_milvus():
-            return milvus.dense_search(
-                milvus.get_client(),
-                [1.0] + [0.0] * 1023,
-                top_k=1,
-                collection=collection,
-            )
 
         hits = await milvus.acall(read_milvus)
         assert len(hits) == 1

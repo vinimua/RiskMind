@@ -30,9 +30,16 @@ class FakeEmbeddingClient:
 
 
 class FakeMilvusClient:
-    def __init__(self, *, fail_flush: bool = False):
+    def __init__(
+        self,
+        *,
+        fail_flush: bool = False,
+        fail_upsert_at: int | None = None,
+    ):
         self.calls = []
         self.fail_flush = fail_flush
+        self.fail_upsert_at = fail_upsert_at
+        self.upsert_attempts = 0
 
     def has_collection(self, collection):
         self.calls.append(("has_collection", collection))
@@ -42,7 +49,10 @@ class FakeMilvusClient:
         self.calls.append(("load", collection))
 
     def upsert(self, collection, rows):
+        self.upsert_attempts += 1
         self.calls.append(("upsert", collection, rows))
+        if self.upsert_attempts == self.fail_upsert_at:
+            raise RuntimeError("Milvus upsert failed")
 
     def flush(self, collection):
         self.calls.append(("flush", collection))
@@ -144,6 +154,79 @@ def test_failed_flush_leaves_batch_pending_for_idempotent_retry(monkeypatch) -> 
         "chunk-001",
     ]
     assert marked == ["chunk-001"]
+
+
+def test_failed_upsert_skips_flush_and_ready_then_retries(monkeypatch) -> None:
+    pending = [_row("001")]
+    marked = _wire_repository(monkeypatch, pending)
+    embedder = FakeEmbeddingClient()
+    client = FakeMilvusClient(fail_upsert_at=1)
+    options = dict(
+        collection="riskmind_knowledge_v003",
+        session_factory=FakeSession,
+        embedding_client=embedder,
+        milvus_client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="Milvus upsert failed"):
+        asyncio.run(ingestion.ingest_pending(**options))
+
+    assert embedder.inputs == [[pending[0].content]]
+    assert [call[0] for call in client.calls if call[0] in {"upsert", "flush"}] == [
+        "upsert"
+    ]
+    assert marked == []
+    assert [row.chunk_id for row in pending] == ["chunk-001"]
+
+    client.fail_upsert_at = None
+    assert asyncio.run(ingestion.ingest_pending(**options)) == 1
+    assert marked == ["chunk-001"]
+    assert [call[2][0]["chunk_id"] for call in client.calls if call[0] == "upsert"] == [
+        "chunk-001",
+        "chunk-001",
+    ]
+    assert len([call for call in client.calls if call[0] == "flush"]) == 1
+
+
+def test_second_batch_failure_preserves_first_batch_and_retries_only_pending(
+    monkeypatch,
+) -> None:
+    pending = [_row(suffix) for suffix in ("001", "002", "003", "004")]
+    marked = _wire_repository(monkeypatch, pending)
+    embedder = FakeEmbeddingClient()
+    client = FakeMilvusClient(fail_upsert_at=2)
+    options = dict(
+        collection="riskmind_knowledge_v003",
+        batch_size=2,
+        session_factory=FakeSession,
+        embedding_client=embedder,
+        milvus_client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="Milvus upsert failed"):
+        asyncio.run(ingestion.ingest_pending(**options))
+
+    assert marked == ["chunk-001", "chunk-002"]
+    assert [row.chunk_id for row in pending] == ["chunk-003", "chunk-004"]
+    assert [call[0] for call in client.calls if call[0] in {"upsert", "flush"}] == [
+        "upsert", "flush", "upsert"
+    ]
+
+    client.fail_upsert_at = None
+    assert asyncio.run(ingestion.ingest_pending(**options)) == 2
+    assert pending == []
+    assert marked == ["chunk-001", "chunk-002", "chunk-003", "chunk-004"]
+    assert embedder.inputs == [
+        ["知识正文 001", "知识正文 002"],
+        ["知识正文 003", "知识正文 004"],
+        ["知识正文 003", "知识正文 004"],
+    ]
+    upserts = [call for call in client.calls if call[0] == "upsert"]
+    assert [[row["chunk_id"] for row in call[2]] for call in upserts] == [
+        ["chunk-001", "chunk-002"],
+        ["chunk-003", "chunk-004"],
+        ["chunk-003", "chunk-004"],
+    ]
 
 
 def test_embedding_failure_does_not_write_or_mark_ready(monkeypatch) -> None:
