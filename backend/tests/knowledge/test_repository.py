@@ -8,6 +8,7 @@ from risk_platform.knowledge.contracts import KnowledgeDocumentType
 from risk_platform.knowledge.models import IngestionStatus, KnowledgeChunkRow
 from risk_platform.knowledge.repository import (
     DocumentVersionConflictError,
+    count_chunks,
     count_by_status,
     list_pending_chunks,
     list_rebuild_chunks,
@@ -199,6 +200,16 @@ def test_rebuild_listing_pages_pending_and_ready_without_committing() -> None:
 
     with pytest.raises(ValueError, match="positive"):
         asyncio.run(list_rebuild_chunks(session, limit=0))
+
+
+def test_count_chunks_reads_all_authoritative_rows_without_committing() -> None:
+    session = _session(_Result(scalar=3))
+
+    assert asyncio.run(count_chunks(session)) == 3
+    statement = session.execute.await_args.args[0]
+    assert "count" in str(statement)
+    assert "knowledge_chunks" in str(statement)
+    session.commit.assert_not_awaited()
 
 
 def test_mark_ready_and_count_do_not_commit() -> None:

@@ -19,8 +19,14 @@ def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) ->
 
     async def list_rebuild(_session, *, limit, after_chunk_id):
         pages.append(after_chunk_id)
-        remaining = [row for row in chunks if after_chunk_id is None or row.chunk_id > after_chunk_id]
+        remaining = [
+            row for row in chunks
+            if after_chunk_id is None or row.chunk_id > after_chunk_id
+        ]
         return remaining[:limit]
+
+    async def count_all(_session):
+        return len(chunks)
 
     async def forbid_ready(_session, _chunk_ids):
         raise AssertionError("rebuild must not update PostgreSQL status")
@@ -29,6 +35,7 @@ def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) ->
         fn()
 
     monkeypatch.setattr(ingestion, "list_rebuild_chunks", list_rebuild)
+    monkeypatch.setattr(ingestion, "count_chunks", count_all)
     monkeypatch.setattr(ingestion, "mark_chunks_ready", forbid_ready)
     monkeypatch.setattr(ingestion.milvus, "acall", run_on_milvus_thread)
     embedder = FakeEmbeddingClient()
@@ -64,13 +71,20 @@ def test_rebuild_failure_can_rerun_same_physical_collection(monkeypatch) -> None
     chunks = [_row(suffix) for suffix in ("001", "002", "003")]
 
     async def list_rebuild(_session, *, limit, after_chunk_id):
-        remaining = [row for row in chunks if after_chunk_id is None or row.chunk_id > after_chunk_id]
+        remaining = [
+            row for row in chunks
+            if after_chunk_id is None or row.chunk_id > after_chunk_id
+        ]
         return remaining[:limit]
+
+    async def count_all(_session):
+        return len(chunks)
 
     async def run_on_milvus_thread(fn):
         fn()
 
     monkeypatch.setattr(ingestion, "list_rebuild_chunks", list_rebuild)
+    monkeypatch.setattr(ingestion, "count_chunks", count_all)
     monkeypatch.setattr(ingestion.milvus, "acall", run_on_milvus_thread)
     client = FakeMilvusClient(fail_upsert_at=2)
     options = dict(
@@ -99,10 +113,14 @@ def test_empty_authoritative_store_creates_an_empty_collection(monkeypatch) -> N
     async def list_rebuild(_session, *, limit, after_chunk_id):
         return []
 
+    async def count_all(_session):
+        return 0
+
     async def run_on_milvus_thread(fn):
         fn()
 
     monkeypatch.setattr(ingestion, "list_rebuild_chunks", list_rebuild)
+    monkeypatch.setattr(ingestion, "count_chunks", count_all)
     monkeypatch.setattr(ingestion.milvus, "acall", run_on_milvus_thread)
     client = FakeMilvusClient()
 
@@ -117,3 +135,49 @@ def test_empty_authoritative_store_creates_an_empty_collection(monkeypatch) -> N
         ("has_collection", "riskmind_knowledge_v003"),
         ("load", "riskmind_knowledge_v003"),
     ]
+
+
+def test_new_smaller_chunk_during_rebuild_requires_rerun(monkeypatch) -> None:
+    chunks = [_row("m"), _row("z")]
+    inserted = False
+
+    async def list_rebuild(_session, *, limit, after_chunk_id):
+        nonlocal inserted
+        if after_chunk_id == "chunk-m" and not inserted:
+            chunks.append(_row("a"))
+            inserted = True
+        remaining = sorted(
+            (
+                row for row in chunks
+                if after_chunk_id is None or row.chunk_id > after_chunk_id
+            ),
+            key=lambda row: row.chunk_id,
+        )
+        return remaining[:limit]
+
+    async def count_all(_session):
+        return len(chunks)
+
+    async def run_on_milvus_thread(fn):
+        fn()
+
+    monkeypatch.setattr(ingestion, "list_rebuild_chunks", list_rebuild)
+    monkeypatch.setattr(ingestion, "count_chunks", count_all)
+    monkeypatch.setattr(ingestion.milvus, "acall", run_on_milvus_thread)
+    client = FakeMilvusClient()
+    options = dict(
+        collection="riskmind_knowledge_v003",
+        batch_size=1,
+        session_factory=FakeSession,
+        embedding_client=FakeEmbeddingClient(),
+        milvus_client=client,
+    )
+
+    with pytest.raises(RuntimeError, match="authoritative knowledge changed"):
+        asyncio.run(ingestion.rebuild_collection(**options))
+
+    upserts = [call[2][0]["chunk_id"] for call in client.calls if call[0] == "upsert"]
+    assert upserts == ["chunk-m", "chunk-z"]
+    assert asyncio.run(ingestion.rebuild_collection(**options)) == 3
+    upserts = [call[2][0]["chunk_id"] for call in client.calls if call[0] == "upsert"]
+    assert upserts == ["chunk-m", "chunk-z", "chunk-a", "chunk-m", "chunk-z"]

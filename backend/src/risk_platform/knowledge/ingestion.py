@@ -10,6 +10,7 @@ from risk_platform.knowledge import milvus
 from risk_platform.knowledge.embeddings import EmbeddingClient, get_embedding_client
 from risk_platform.knowledge.models import KnowledgeChunkRow
 from risk_platform.knowledge.repository import (
+    count_chunks,
     list_pending_chunks,
     list_rebuild_chunks,
     mark_chunks_ready,
@@ -74,6 +75,8 @@ async def rebuild_collection(
 
     _validate_options(collection, batch_size)
     sessions = session_factory or get_session_factory()
+    async with sessions() as session:
+        expected_count = await count_chunks(session)
     after_chunk_id = None
     written = 0
     while True:
@@ -88,6 +91,12 @@ async def rebuild_collection(
                     milvus.ensure_collection(client, collection)
 
                 await milvus.acall(ensure_empty_collection)
+            async with sessions() as session:
+                actual_count = await count_chunks(session)
+            if actual_count != expected_count:
+                raise RuntimeError(
+                    "authoritative knowledge changed during rebuild; rerun rebuild"
+                )
             return written
 
         await _embed_and_upsert(

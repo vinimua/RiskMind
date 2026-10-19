@@ -40,5 +40,6 @@ upsert and flush; rerun it after a failure.
 the specified physical collection. It never changes PostgreSQL statuses. Use
 a **new empty physical collection** for a complete rebuild: upsert does not
 remove stale rows already present in an existing collection. An interrupted
-rebuild can be rerun against that same new collection. Neither command switches
-the active Milvus alias.
+rebuild can be rerun against that same new collection. If PostgreSQL gains
+chunks while rebuild is running, the command reports an error; rerun it to
+include the new chunks. Neither command switches the active Milvus alias.

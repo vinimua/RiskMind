@@ -157,6 +157,13 @@ async def list_rebuild_chunks(
     return list(result.scalars())
 
 
+async def count_chunks(session: AsyncSession) -> int:
+    """Count all authoritative chunks for rebuild source-change detection."""
+
+    result = await session.execute(select(func.count()).select_from(KnowledgeChunkRow))
+    return int(result.scalar_one())
+
+
 async def mark_chunks_ready(
     session: AsyncSession,
     chunk_ids: Sequence[str],
