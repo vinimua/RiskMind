@@ -10,7 +10,7 @@ from risk_platform.knowledge import ingestion, milvus
 from risk_platform.knowledge.chunking import KnowledgeChunk
 from risk_platform.knowledge.contracts import KnowledgeDocumentType
 from risk_platform.knowledge.ingestion import ingest_pending
-from risk_platform.knowledge.models import IngestionStatus, KnowledgeChunkRow
+from risk_platform.knowledge.models import IngestionStatus, KnowledgeChunkRow, KnowledgeCollectionRow
 from risk_platform.knowledge.repository import stage_chunks
 
 
@@ -50,7 +50,7 @@ async def _exercise_ingestion(monkeypatch: pytest.MonkeyPatch) -> None:
 
         original_mark_ready = ingestion.mark_chunks_ready
 
-        async def fail_mark_ready(_session, _chunk_ids):
+        async def fail_mark_ready(_session, _chunk_ids, **_kwargs):
             raise RuntimeError("database update failed")
 
         monkeypatch.setattr(ingestion, "mark_chunks_ready", fail_mark_ready)
@@ -113,6 +113,9 @@ async def _exercise_ingestion(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         async with sessions() as session:
             async with session.begin():
+                await session.execute(delete(KnowledgeCollectionRow).where(
+                    KnowledgeCollectionRow.collection == collection,
+                ))
                 await session.execute(
                     delete(KnowledgeChunkRow).where(
                         KnowledgeChunkRow.document_id == document_id

@@ -1,9 +1,16 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from risk_platform.knowledge import ingestion
+
+
+@pytest.fixture(autouse=True)
+def isolated_collection_binding(monkeypatch):
+    # Binding SQL has independent relational tests; these tests isolate task retry.
+    monkeypatch.setattr(ingestion, "bind_collection", AsyncMock())
 
 
 class FakeSession:
@@ -48,6 +55,9 @@ class FakeMilvusClient:
     def load_collection(self, collection):
         self.calls.append(("load", collection))
 
+    def describe_collection(self, collection):
+        return {"collection_name": collection, "properties": {}}
+
     def upsert(self, collection, rows):
         self.upsert_attempts += 1
         self.calls.append(("upsert", collection, rows))
@@ -79,10 +89,10 @@ def _row(suffix):
 def _wire_repository(monkeypatch, pending):
     marked = []
 
-    async def list_pending(_session, *, limit):
+    async def list_pending(_session, *, limit, index_profile):
         return pending[:limit]
 
-    async def mark_ready(_session, chunk_ids):
+    async def mark_ready(_session, chunk_ids, *, index_profile):
         marked.extend(chunk_ids)
         pending[:] = [row for row in pending if row.chunk_id not in chunk_ids]
         return len(chunk_ids)

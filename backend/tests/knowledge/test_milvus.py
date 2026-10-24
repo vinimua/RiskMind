@@ -91,6 +91,9 @@ class FakeMilvusClient:
     def has_collection(self, collection: str) -> bool:
         return self.collection_exists
 
+    def describe_collection(self, collection: str):
+        return {"collection_name": collection, "description": self.schema_options.get("description", "")}
+
     def create_schema(self, **kwargs) -> FakeSchema:
         self.schema_options = kwargs
         return self.schema

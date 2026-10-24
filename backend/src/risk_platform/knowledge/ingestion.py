@@ -14,7 +14,9 @@ from risk_platform.knowledge.repository import (
     list_pending_chunks,
     list_rebuild_chunks,
     mark_chunks_ready,
+    bind_collection,
 )
+from risk_platform.knowledge.indexing.profiles import IndexProfile
 
 
 DEFAULT_BATCH_SIZE = 32
@@ -24,6 +26,7 @@ MAX_BATCH_SIZE = 64
 async def ingest_pending(
     *,
     collection: str,
+    index_profile: IndexProfile = IndexProfile.BASELINE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     embedding_client: EmbeddingClient | None = None,
@@ -37,11 +40,17 @@ async def ingest_pending(
 
     _validate_options(collection, batch_size)
 
+    profile = IndexProfile(index_profile)
     sessions = session_factory or get_session_factory()
+    async with sessions() as session:
+        async with session.begin():
+            await bind_collection(
+                session, collection=collection, index_profile=profile, purpose="INGESTION",
+            )
     completed = 0
     while True:
         async with sessions() as session:
-            pending = await list_pending_chunks(session, limit=batch_size)
+            pending = await list_pending_chunks(session, limit=batch_size, index_profile=profile)
         if not pending:
             return completed
 
@@ -50,18 +59,20 @@ async def ingest_pending(
             collection=collection,
             embedding_client=embedding_client,
             milvus_client=milvus_client,
+            index_profile=profile,
         )
 
         async with sessions() as session:
             async with session.begin():
                 completed += await mark_chunks_ready(
-                    session, [row.chunk_id for row in pending]
+                    session, [row.chunk_id for row in pending], index_profile=profile,
                 )
 
 
 async def rebuild_collection(
     *,
     collection: str,
+    index_profile: IndexProfile = IndexProfile.BASELINE,
     batch_size: int = DEFAULT_BATCH_SIZE,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     embedding_client: EmbeddingClient | None = None,
@@ -74,25 +85,31 @@ async def rebuild_collection(
     """
 
     _validate_options(collection, batch_size)
+    profile = IndexProfile(index_profile)
     sessions = session_factory or get_session_factory()
     async with sessions() as session:
-        expected_count = await count_chunks(session)
+        async with session.begin():
+            await bind_collection(
+                session, collection=collection, index_profile=profile, purpose="REBUILD",
+            )
+    async with sessions() as session:
+        expected_count = await count_chunks(session, index_profile=profile)
     after_chunk_id = None
     written = 0
     while True:
         async with sessions() as session:
             chunks = await list_rebuild_chunks(
-                session, limit=batch_size, after_chunk_id=after_chunk_id
+                session, limit=batch_size, after_chunk_id=after_chunk_id, index_profile=profile,
             )
         if not chunks:
             if written == 0:
                 def ensure_empty_collection() -> None:
                     client = milvus_client or milvus.get_client()
-                    milvus.ensure_collection(client, collection)
+                    milvus.ensure_collection(client, collection, index_profile=profile)
 
                 await milvus.acall(ensure_empty_collection)
             async with sessions() as session:
-                actual_count = await count_chunks(session)
+                actual_count = await count_chunks(session, index_profile=profile)
             if actual_count != expected_count:
                 raise RuntimeError(
                     "authoritative knowledge changed during rebuild; rerun rebuild"
@@ -104,6 +121,7 @@ async def rebuild_collection(
             collection=collection,
             embedding_client=embedding_client,
             milvus_client=milvus_client,
+            index_profile=profile,
         )
         written += len(chunks)
         after_chunk_id = chunks[-1].chunk_id
@@ -124,6 +142,7 @@ async def _embed_and_upsert(
     collection: str,
     embedding_client: EmbeddingClient | None,
     milvus_client: MilvusClient | None,
+    index_profile: IndexProfile,
 ) -> None:
     embedder = embedding_client or get_embedding_client()
     vectors = await embedder.embed_texts([row.content for row in chunks])
@@ -147,7 +166,7 @@ async def _embed_and_upsert(
 
     def write_batch() -> None:
         client = milvus_client or milvus.get_client()
-        milvus.ensure_collection(client, collection)
+        milvus.ensure_collection(client, collection, index_profile=index_profile)
         milvus.upsert_chunks(client, rows, collection)
         milvus.flush(client, collection)
 

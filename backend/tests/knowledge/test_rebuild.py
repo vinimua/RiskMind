@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,13 +12,18 @@ from .test_ingestion import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_collection_binding(monkeypatch):
+    monkeypatch.setattr(ingestion, "bind_collection", AsyncMock())
+
+
 def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) -> None:
     chunks = [_row(suffix) for suffix in ("001", "002", "003")]
     for row, status in zip(chunks, ("READY", "PENDING", "READY"), strict=True):
         row.ingestion_status = status
     pages = []
 
-    async def list_rebuild(_session, *, limit, after_chunk_id):
+    async def list_rebuild(_session, *, limit, after_chunk_id, index_profile):
         pages.append(after_chunk_id)
         remaining = [
             row for row in chunks
@@ -25,10 +31,10 @@ def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) ->
         ]
         return remaining[:limit]
 
-    async def count_all(_session):
+    async def count_all(_session, *, index_profile):
         return len(chunks)
 
-    async def forbid_ready(_session, _chunk_ids):
+    async def forbid_ready(_session, _chunk_ids, *, index_profile):
         raise AssertionError("rebuild must not update PostgreSQL status")
 
     async def run_on_milvus_thread(fn):
@@ -70,14 +76,14 @@ def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) ->
 def test_rebuild_failure_can_rerun_same_physical_collection(monkeypatch) -> None:
     chunks = [_row(suffix) for suffix in ("001", "002", "003")]
 
-    async def list_rebuild(_session, *, limit, after_chunk_id):
+    async def list_rebuild(_session, *, limit, after_chunk_id, index_profile):
         remaining = [
             row for row in chunks
             if after_chunk_id is None or row.chunk_id > after_chunk_id
         ]
         return remaining[:limit]
 
-    async def count_all(_session):
+    async def count_all(_session, *, index_profile):
         return len(chunks)
 
     async def run_on_milvus_thread(fn):
@@ -110,10 +116,10 @@ def test_rebuild_failure_can_rerun_same_physical_collection(monkeypatch) -> None
 
 
 def test_empty_authoritative_store_creates_an_empty_collection(monkeypatch) -> None:
-    async def list_rebuild(_session, *, limit, after_chunk_id):
+    async def list_rebuild(_session, *, limit, after_chunk_id, index_profile):
         return []
 
-    async def count_all(_session):
+    async def count_all(_session, *, index_profile):
         return 0
 
     async def run_on_milvus_thread(fn):
@@ -141,7 +147,7 @@ def test_new_smaller_chunk_during_rebuild_requires_rerun(monkeypatch) -> None:
     chunks = [_row("m"), _row("z")]
     inserted = False
 
-    async def list_rebuild(_session, *, limit, after_chunk_id):
+    async def list_rebuild(_session, *, limit, after_chunk_id, index_profile):
         nonlocal inserted
         if after_chunk_id == "chunk-m" and not inserted:
             chunks.append(_row("a"))
@@ -155,7 +161,7 @@ def test_new_smaller_chunk_during_rebuild_requires_rerun(monkeypatch) -> None:
         )
         return remaining[:limit]
 
-    async def count_all(_session):
+    async def count_all(_session, *, index_profile):
         return len(chunks)
 
     async def run_on_milvus_thread(fn):

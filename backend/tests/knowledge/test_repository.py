@@ -33,6 +33,7 @@ class _Result:
 def _session(result: _Result):
     session = Mock()
     session.execute = AsyncMock(return_value=result)
+    session.get = AsyncMock(return_value=None)
     session.flush = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()

@@ -22,8 +22,9 @@ def test_knowledge_chunk_table_has_frozen_columns_constraints_and_indexes() -> N
         "created_at",
         "updated_at",
         "ready_at",
+        "index_profile",
     ]
-    assert table.primary_key.columns.keys() == ["chunk_id"]
+    assert table.primary_key.columns.keys() == ["chunk_id", "index_profile"]
     assert isinstance(table.c.source_uri.type, String)
     assert table.c.source_uri.type.length == 2048
     assert table.c.source_uri.nullable is False

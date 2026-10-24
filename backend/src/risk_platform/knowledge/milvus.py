@@ -10,6 +10,7 @@ from pymilvus import DataType, Function, FunctionType, MilvusClient
 
 from risk_platform.knowledge.contracts import KnowledgeFilters
 from risk_platform.knowledge.embeddings import EMBEDDING_DIMENSION
+from risk_platform.knowledge.indexing.profiles import IndexProfile
 
 
 DEFAULT_MILVUS_URI = "http://localhost:19530"
@@ -63,16 +64,31 @@ def get_client(uri: str | None = None) -> MilvusClient:
 def ensure_collection(
     client: MilvusClient,
     collection: str,
+    *,
+    index_profile: IndexProfile | None = None,
 ) -> None:
     """Create the frozen schema if absent; otherwise load without migration."""
 
-    if client is _CLIENT and collection in _ENSURED_COLLECTIONS:
+    if index_profile is None and client is _CLIENT and collection in _ENSURED_COLLECTIONS:
         return
 
     if client.has_collection(collection):
+        if index_profile is not None:
+            description = client.describe_collection(collection)
+            if description["collection_name"] != collection:
+                raise ValueError("index writes require a physical collection, not an alias")
+            owner = description.get("description", "")
+            if owner != f"riskmind:index-profile:{index_profile.value}" and not (
+                not owner.startswith("riskmind:index-profile:") and index_profile == IndexProfile.BASELINE
+            ):
+                raise ValueError("Milvus collection has another or unknown index profile")
         client.load_collection(collection)
     else:
-        schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+        schema = client.create_schema(
+            auto_id=False, enable_dynamic_field=False,
+            **({"description": f"riskmind:index-profile:{index_profile.value}"}
+               if index_profile is not None else {}),
+        )
         schema.add_field(
             "chunk_id",
             DataType.VARCHAR,
