@@ -40,10 +40,10 @@ The SHA256 digest is computed from the profile and complete ordered JSON child
 payloads, not just IDs or counts. READY, timestamps and embeddings are excluded.
 This is materialization integrity validation, not a retrieval-quality benchmark.
 
-`validate_serving_collection()` performs the same explicit acceptance for an
-INGESTION target. Successful ingestion alone creates no acceptance or route.
-Neither collection purpose implies serving eligibility. Empty complete
-materializations may be explicitly accepted; this does not claim useful hits.
+`validate_serving_collection()` accepts REBUILD targets only. INGESTION targets
+remain continuously writable and cannot receive acceptance or activation.
+Successful ingestion creates no acceptance or route. A REBUILD binding alone
+does not imply eligibility. Empty complete rebuilds may be explicitly accepted.
 
 Acceptance holds an exclusive profile-source advisory lock and a collection
 write lock. Staging takes the shared source lock through commit. Application
@@ -51,8 +51,9 @@ Milvus writes use the same collection lock and reject accepted targets. An
 accepted physical collection is therefore frozen even before activation.
 Repeated successful rebuilds revalidate and return the original count without
 rewriting it. If sources changed, use a new physical REBUILD collection.
-If an INGESTION target has been accepted, newly staged data must be materialized
-into a fresh rebuild target; accepted-target writes are intentionally rejected.
+New documents continue through the same INGESTION target without changing the
+current serving snapshot. Only rebuild, validation and explicit activation of a
+new REBUILD collection can advance the serving route.
 
 ## Explicit activation
 

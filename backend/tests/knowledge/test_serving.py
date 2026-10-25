@@ -21,6 +21,7 @@ from risk_platform.knowledge.serving_contracts import CollectionBuildAcceptance
 from risk_platform.knowledge.contracts import KnowledgeHit, KnowledgeSourceRef, KnowledgeDocumentType
 from .test_profile_persistence import AsyncFacade, ProfileMilvus, document, sessions, stage
 from .test_ingestion import FakeEmbeddingClient
+from risk_platform.knowledge.repository import bind_collection
 
 
 @pytest.fixture(autouse=True)
@@ -196,19 +197,67 @@ def test_incomplete_or_corrupt_materialization_has_no_eligible_record(sessions, 
         await stage(sessions, document(), IndexProfile.BASELINE)
         await ingest_pending(collection="ingestion", session_factory=sessions, milvus_client=client,
                              embedding_client=FakeEmbeddingClient())
+        async with sessions() as session:
+            async with session.begin():
+                await bind_collection(session, collection="candidate", index_profile=IndexProfile.BASELINE,
+                                      purpose="REBUILD")
+        client.collections["candidate"] = client.collections["ingestion"]
+        client.upserts = [("candidate", rows) for _, rows in client.upserts]
         row = client.upserts[0][1][0]
         if failure == "missing":
             client.upserts.clear()
         elif failure == "extra":
-            client.upserts.append(("ingestion", [{**row, "chunk_id": "extra"}]))
+            client.upserts.append(("candidate", [{**row, "chunk_id": "extra"}]))
         else:
-            client.upserts.append(("ingestion", [{**row, "content": "Corrupt"}]))
+            client.upserts.append(("candidate", [{**row, "content": "Corrupt"}]))
         with pytest.raises(ServingEligibilityError):
-            await validate_serving_collection(collection="ingestion", index_profile=IndexProfile.BASELINE,
+            await validate_serving_collection(collection="candidate", index_profile=IndexProfile.BASELINE,
                                               session_factory=sessions, milvus_client=client)
         async with sessions() as session:
             assert list((await session.execute(select(KnowledgeCollectionBuildRow))).scalars()) == []
     asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("profile", list(IndexProfile))
+def test_incremental_ingestion_does_not_change_serving_snapshot(sessions, profile):
+    asyncio.run(exercise_incremental_lifecycle(sessions, ProfileMilvus(), profile))
+
+
+async def exercise_incremental_lifecycle(sessions, client, profile, prefix="lifecycle"):
+    ingestion, v1, v2 = (f"{prefix}_{suffix}" for suffix in ("ingestion", "v1", "v2"))
+    options = dict(index_profile=profile, session_factory=sessions, milvus_client=client,
+                   embedding_client=FakeEmbeddingClient())
+    await stage(sessions, document("Document A").model_copy(update={"document_id": f"{prefix}-A"}), profile)
+    assert await ingest_pending(collection=ingestion, **options) > 0
+    with pytest.raises(ServingEligibilityError, match="REBUILD"):
+        await validate_serving_collection(collection=ingestion, index_profile=profile,
+                                          session_factory=sessions, milvus_client=client)
+    async with sessions() as session:
+        assert list((await session.execute(select(KnowledgeCollectionBuildRow).where(
+            KnowledgeCollectionBuildRow.collection == ingestion,
+        ))).scalars()) == []
+    await rebuild_collection(collection=v1, **options)
+    first = await validate_serving_collection(collection=v1, index_profile=profile,
+                                              session_factory=sessions, milvus_client=client)
+    original = await activate(sessions, client, first, key=f"{prefix}-first")
+    await stage(sessions, document("Document B").model_copy(update={"document_id": f"{prefix}-B"}), profile)
+    assert await ingest_pending(collection=ingestion, **options) > 0
+    async with sessions() as session:
+        rows = list((await session.execute(select(KnowledgeChunkRow).where(
+            KnowledgeChunkRow.document_id == f"{prefix}-B", KnowledgeChunkRow.index_profile == profile.value,
+        ))).scalars())
+        assert rows and all(row.ingestion_status == "READY" for row in rows)
+        assert await resolve_serving_route(session, profile) == original
+    await rebuild_collection(collection=v2, **options)
+    second = await validate_serving_collection(collection=v2, index_profile=profile,
+                                               session_factory=sessions, milvus_client=client)
+    assert second.source_chunk_count > first.source_chunk_count
+    async with sessions() as session:
+        assert await resolve_serving_route(session, profile) == original
+    current = await activate(sessions, client, second, key=f"{prefix}-second", expected=1)
+    assert current.collection == v2 and current.route_version == original.route_version + 1
+    async with sessions() as session:
+        assert await resolve_serving_route(session, profile) == current
 
 
 def test_activation_rechecks_remote_payload_and_route_changes_roll_back(sessions):

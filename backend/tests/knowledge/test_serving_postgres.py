@@ -22,6 +22,7 @@ from risk_platform.knowledge.serving import (
 from .test_ingestion import FakeEmbeddingClient
 from .test_profile_migration import migration_config
 from .test_profile_persistence import ProfileMilvus, document, stage
+from .test_serving import exercise_incremental_lifecycle
 
 
 pytestmark = pytest.mark.skipif(
@@ -36,6 +37,7 @@ async def exercise(url):
     actual = os.environ.get("RUN_INGESTION_INTEGRATION") == "1"
     client = await milvus.acall(lambda: MilvusClient(uri=os.environ["MILVUS_URI"]) if actual else ProfileMilvus())
     names = [f"riskmind_serving_{uuid4().hex}" for _ in range(3)]
+    lifecycle_prefix = f"riskmind_lifecycle_{uuid4().hex}"
     try:
         await stage(sessions, document(), IndexProfile.BASELINE)
         receipts = []
@@ -101,10 +103,11 @@ async def exercise(url):
             await activate(receipts[1], "stale", 3)
         async with sessions() as session:
             assert (await resolve_serving_route(session, IndexProfile.BASELINE)).route_version == 3
+        await exercise_incremental_lifecycle(sessions, client, IndexProfile.PARENT_CHILD, lifecycle_prefix)
     finally:
         if actual:
             def cleanup():
-                for name in names:
+                for name in names + [f"{lifecycle_prefix}_{suffix}" for suffix in ("ingestion", "v1", "v2")]:
                     if client.has_collection(name):
                         client.drop_collection(name)
                 client.close()
@@ -135,7 +138,9 @@ def test_upgrade_0003_and_real_activation_concurrency(monkeypatch):
         with pytest.raises(DBAPIError, match="cannot discard serving acceptance or activation history"):
             command.downgrade(migration_config(), "20261024_0002")
         with isolated.connect() as connection:
-            assert connection.execute(select(KnowledgeServingRouteRow.route_version)).scalar_one() == 3
+            assert connection.execute(select(KnowledgeServingRouteRow.route_version).where(
+                KnowledgeServingRouteRow.index_profile == IndexProfile.BASELINE.value,
+            )).scalar_one() == 3
     finally:
         isolated.dispose()
         with root.begin() as connection:

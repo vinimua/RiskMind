@@ -120,7 +120,7 @@ async def validate_serving_collection(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     milvus_client: MilvusClient | None = None,
 ) -> CollectionBuildAcceptance:
-    """Explicitly accept a complete REBUILD or INGESTION target; never activate it.
+    """Explicitly accept a complete REBUILD target; never activate it.
 
     Only successful acceptance is persisted. Failed/inconclusive validation has
     no eligible record. Identical repeats return the original immutable receipt.
@@ -135,6 +135,8 @@ async def validate_serving_collection(
             binding = await session.get(KnowledgeCollectionRow, collection)
             if binding is None or binding.index_profile != profile.value:
                 raise ServingEligibilityError("collection must be bound to the requested profile")
+            if binding.purpose != "REBUILD":
+                raise ServingEligibilityError("serving acceptance requires a REBUILD target; INGESTION remains writable")
             count, digest = await _validate_materialized(session, client, collection, profile)
             build_id = "collection-build-" + hashlib.sha256(
                 json.dumps([profile.value, collection, digest]).encode("utf-8")
@@ -190,6 +192,9 @@ async def activate_serving_collection(
         raise PermissionError("actor is not authorized to activate this index profile")
     await _lock(session, f"riskmind:serving-activation-key:{idempotency_key}")
     await lock_profile_source(session, profile)
+    binding = await session.get(KnowledgeCollectionRow, build.collection)
+    if binding is None or binding.index_profile != profile.value or binding.purpose != "REBUILD":
+        raise ServingEligibilityError("serving activation requires a REBUILD target")
     receipt = await session.get(KnowledgeServingActivationRow, idempotency_key)
     if receipt is not None:
         if (receipt.build_id, receipt.activated_by, receipt.route_version - 1) != (
