@@ -254,7 +254,7 @@ def test_embedding_failure_does_not_write_or_mark_ready(monkeypatch) -> None:
             )
         )
 
-    assert client.calls == []
+    assert client.calls == [("has_collection", "riskmind_knowledge_v003")]
     assert marked == []
     assert len(pending) == 1
 

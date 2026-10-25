@@ -41,6 +41,7 @@ async def ingest_pending(
     _validate_options(collection, batch_size)
 
     profile = IndexProfile(index_profile)
+    await _preflight_collection(collection, profile, milvus_client)
     sessions = session_factory or get_session_factory()
     async with sessions() as session:
         async with session.begin():
@@ -86,6 +87,7 @@ async def rebuild_collection(
 
     _validate_options(collection, batch_size)
     profile = IndexProfile(index_profile)
+    await _preflight_collection(collection, profile, milvus_client)
     sessions = session_factory or get_session_factory()
     async with sessions() as session:
         async with session.begin():
@@ -125,6 +127,15 @@ async def rebuild_collection(
         )
         written += len(chunks)
         after_chunk_id = chunks[-1].chunk_id
+
+
+async def _preflight_collection(
+    collection: str, profile: IndexProfile, client: MilvusClient | None,
+) -> None:
+    def check() -> None:
+        milvus.validate_collection_for_profile(client or milvus.get_client(), collection, profile)
+
+    await milvus.acall(check)
 
 
 def _validate_options(collection: str, batch_size: int) -> None:

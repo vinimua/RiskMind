@@ -91,6 +91,13 @@ their supplied source reproduces the persisted Baseline business fields; their
 original raw source cannot be recovered from historical chunks. Once enrolled,
 the complete supplied canonical source is immutable.
 
+Both ingestion and rebuild run a read-only Milvus compatibility preflight before
+committing the PostgreSQL binding. Preflight never creates or loads a collection;
+an incompatible owner, alias or lookup failure leaves no new binding, even with
+an empty work queue. Write-time validation remains in place. Concurrent external
+creation after a successful preflight is still a race, not a distributed
+transaction guarantee.
+
 Every physical collection is durably bound to a profile and a write purpose
 before external writes. A profile has one INGESTION collection and may have
 multiple REBUILD collections. Bindings cannot be repurposed implicitly. New
@@ -109,7 +116,10 @@ alias switching are outside Stage 6C.
 For an upgrade with existing READY Baseline rows, the first `resume` binding
 must name the actual historical ingestion collection. PostgreSQL did not
 previously record this name and cannot infer it. An unmarked existing collection
-may be adopted only as Baseline. Use `rebuild` for any new collection. Do not
+may be adopted only as Baseline during the migration period. This exception is
+solely for Stage 5 legacy adoption and should be retired after those collections
+have been migrated; all new collections must carry an explicit profile marker.
+Use `rebuild` for any new collection. Do not
 remove production binding rows to bypass this rule; removing bindings or changing
 Milvus descriptions requires a separately reviewed recovery procedure.
 
@@ -118,3 +128,14 @@ ownership. Export and explicitly retire these objects before a downgrade.
 `RUN_POSTGRES_INTEGRATION=1` enables an isolated-schema test of migration, legacy
 row preservation, concurrent staging and conflicting collection ownership;
 the existing Milvus/ingestion integration switches remain available.
+
+To exercise the complete migration/resume/Parent-Child scenario, point
+`RISK_DATABASE_URL` and `MILVUS_URI` at disposable PostgreSQL and Milvus servers,
+set all three integration switches to `1`, and run
+`python -m pytest tests/knowledge/test_profile_postgres.py -q` from `backend`.
+The test creates a UUID-named schema, upgrades 0001 with legacy PENDING/READY
+rows to 0002, checks preserved IDs/content/statuses, resumes Baseline, rejects
+a real Milvus owner conflict without a PostgreSQL binding, then stages and
+ingests Parent-Child into a different target. It also exercises advisory-lock
+concurrency. Embeddings are deterministic test vectors; no embedding API is used.
+Only its own temporary schema and generated collection names are cleaned up.

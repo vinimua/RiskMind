@@ -8,13 +8,17 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine, make_url, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from pymilvus import MilvusClient
 
 from risk_platform.knowledge.indexing import BaselineIndexBuildStrategy, ParentChildIndexBuildStrategy
 from risk_platform.knowledge.indexing.profiles import IndexProfile
-from risk_platform.knowledge.models import KnowledgeChunkRow
+from risk_platform.knowledge.models import KnowledgeChunkRow, KnowledgeCollectionRow
+from risk_platform.knowledge import milvus
+from risk_platform.knowledge.ingestion import ingest_pending
 from risk_platform.knowledge.repository import DocumentVersionConflictError, bind_collection, stage_prepared
 from .test_profile_migration import migration_config
-from .test_profile_persistence import document
+from .test_profile_persistence import document, ProfileMilvus
+from .test_ingestion import FakeEmbeddingClient
 
 
 pytestmark = pytest.mark.skipif(
@@ -78,6 +82,81 @@ async def exercise(url):
         await engine.dispose()
 
 
+async def verify_migrated_ingestion(url):
+    """Use real Milvus when explicitly enabled; never call an embedding API."""
+    engine = create_async_engine(url)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    actual_milvus = os.environ.get("RUN_INGESTION_INTEGRATION") == "1"
+    client = None
+    names = [f"riskmind_6c_{kind}_{uuid4().hex}" for kind in ("baseline", "pc", "conflict")]
+    try:
+        client = await milvus.acall(
+            lambda: MilvusClient(uri=os.environ["MILVUS_URI"]) if actual_milvus else ProfileMilvus()
+        )
+        await milvus.acall(lambda: milvus.ensure_collection(
+            client, names[2], index_profile=IndexProfile.BASELINE,
+        ))
+        with pytest.raises(ValueError, match="another or unknown index profile"):
+            await ingest_pending(
+                collection=names[2], index_profile=IndexProfile.PARENT_CHILD,
+                session_factory=sessions, embedding_client=FakeEmbeddingClient(), milvus_client=client,
+            )
+        async with sessions() as session:
+            assert await session.get(KnowledgeCollectionRow, names[2]) is None
+            assert list((await session.execute(select(KnowledgeCollectionRow))).scalars()) == []
+        # Simulate the migration-period legacy Baseline collection without a marker.
+        await milvus.acall(lambda: milvus.ensure_collection(client, names[0]))
+        async with sessions() as session:
+            before = list((await session.execute(select(KnowledgeChunkRow).where(
+                KnowledgeChunkRow.index_profile == "baseline-v1",
+            ))).scalars())
+        expected_pending = sum(row.ingestion_status == "PENDING" for row in before)
+        assert expected_pending > 0
+        count = await ingest_pending(
+            collection=names[0], session_factory=sessions,
+            embedding_client=FakeEmbeddingClient(), milvus_client=client,
+        )
+        assert count == expected_pending
+        async with sessions() as session:
+            rows = list((await session.execute(select(KnowledgeChunkRow).where(
+                KnowledgeChunkRow.index_profile == "baseline-v1",
+            ))).scalars())
+            assert all(row.ingestion_status == "READY" for row in rows)
+            assert {row.chunk_id: row.content for row in rows} == {
+                row.chunk_id: row.content for row in before
+            }
+        doc = document("Parent-Child after migration.").model_copy(update={"document_id": "REPORT-INGEST"})
+        prepared = ParentChildIndexBuildStrategy().build(doc)
+        async with sessions() as session:
+            async with session.begin():
+                assert await stage_prepared(session, doc, prepared, index_profile=IndexProfile.PARENT_CHILD) > 0
+        assert await ingest_pending(
+            collection=names[1], index_profile=IndexProfile.PARENT_CHILD, session_factory=sessions,
+            embedding_client=FakeEmbeddingClient(), milvus_client=client,
+        ) > 0
+        async with sessions() as session:
+            stored = list((await session.execute(select(KnowledgeChunkRow).where(
+                KnowledgeChunkRow.index_profile == "parent-child-v1",
+            ))).scalars())
+            assert stored and all(row.ingestion_status == "READY" for row in stored)
+        if actual_milvus:
+            def verify():
+                description = client.describe_collection(names[1])
+                assert description["description"] == "riskmind:index-profile:parent-child-v1"
+                counts = client.query(names[1], filter="", output_fields=["count(*)"], consistency_level="Strong")
+                assert counts[0]["count(*)"] == len(stored)
+            await milvus.acall(verify)
+    finally:
+        if client is not None and actual_milvus:
+            def cleanup():
+                for name in names:
+                    if client.has_collection(name):
+                        client.drop_collection(name)
+                client.close()
+            await milvus.acall(cleanup)
+        await engine.dispose()
+
+
 def test_real_migration_preserves_legacy_rows_and_serializes_profile_writers(monkeypatch):
     # UUID-derived schema is the only DDL cleanup target; never migrate the user's
     # default/public schema as part of this test.
@@ -95,15 +174,25 @@ def test_real_migration_preserves_legacy_rows_and_serializes_profile_writers(mon
             with isolated_engine.begin() as connection:
                 connection.execute(text("""INSERT INTO knowledge_chunks
                     (chunk_id,document_id,document_version,document_type,title,section_path,content,source_uri,ingestion_status)
-                    VALUES ('legacy','legacy','v1','MODEL_DEVELOPMENT_REPORT','Legacy','','Text.','knowledge://legacy','READY')"""))
+                    VALUES ('legacy-ready','legacy','v1','MODEL_DEVELOPMENT_REPORT','Legacy','','Ready text.','knowledge://legacy','READY'),
+                           ('legacy-pending','legacy','v1','MODEL_DEVELOPMENT_REPORT','Legacy','','Pending text.','knowledge://legacy','PENDING')"""))
             command.upgrade(migration_config(), "head")
             with isolated_engine.connect() as connection:
                 row = connection.execute(select(KnowledgeChunkRow.chunk_id, KnowledgeChunkRow.content,
-                                                KnowledgeChunkRow.index_profile, KnowledgeChunkRow.ingestion_status)).one()
-                assert tuple(row) == ("legacy", "Text.", "baseline-v1", "READY")
+                                                KnowledgeChunkRow.index_profile, KnowledgeChunkRow.ingestion_status)
+                                         .order_by(KnowledgeChunkRow.chunk_id)).all()
+                assert [tuple(item) for item in row] == [
+                    ("legacy-pending", "Pending text.", "baseline-v1", "PENDING"),
+                    ("legacy-ready", "Ready text.", "baseline-v1", "READY"),
+                ]
             if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
                 asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
             asyncio.run(exercise(isolated_url))
+            # Retire only this disposable schema's concurrency-test bindings so
+            # the independent ingestion scenario has unbound profile targets.
+            with isolated_engine.begin() as connection:
+                connection.execute(text("DELETE FROM knowledge_collections"))
+            asyncio.run(verify_migrated_ingestion(isolated_url))
         finally:
             isolated_engine.dispose()
     finally:

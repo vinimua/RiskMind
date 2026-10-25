@@ -61,6 +61,30 @@ def get_client(uri: str | None = None) -> MilvusClient:
     return _CLIENT
 
 
+def validate_collection_for_profile(
+    client: MilvusClient,
+    collection: str,
+    index_profile: IndexProfile,
+) -> None:
+    """Read-only compatibility check; never create, load or modify a collection."""
+    profile = IndexProfile(index_profile)
+    if not client.has_collection(collection):
+        return
+    _validate_collection_description(client.describe_collection(collection), collection, profile)
+
+
+def _validate_collection_description(
+    description: dict[str, Any], collection: str, profile: IndexProfile,
+) -> None:
+    if description["collection_name"] != collection:
+        raise ValueError("index writes require a physical collection, not an alias")
+    owner = description.get("description", "")
+    if owner != f"riskmind:index-profile:{profile.value}" and not (
+        not owner.startswith("riskmind:index-profile:") and profile == IndexProfile.BASELINE
+    ):
+        raise ValueError("Milvus collection has another or unknown index profile")
+
+
 def ensure_collection(
     client: MilvusClient,
     collection: str,
@@ -74,14 +98,10 @@ def ensure_collection(
 
     if client.has_collection(collection):
         if index_profile is not None:
-            description = client.describe_collection(collection)
-            if description["collection_name"] != collection:
-                raise ValueError("index writes require a physical collection, not an alias")
-            owner = description.get("description", "")
-            if owner != f"riskmind:index-profile:{index_profile.value}" and not (
-                not owner.startswith("riskmind:index-profile:") and index_profile == IndexProfile.BASELINE
-            ):
-                raise ValueError("Milvus collection has another or unknown index profile")
+            # Recheck at write time as well as before the PostgreSQL binding.
+            _validate_collection_description(
+                client.describe_collection(collection), collection, IndexProfile(index_profile),
+            )
         client.load_collection(collection)
     else:
         schema = client.create_schema(

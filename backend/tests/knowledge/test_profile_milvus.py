@@ -9,6 +9,24 @@ from risk_platform.knowledge.indexing.profiles import IndexProfile
 from .test_milvus import FakeMilvusClient
 
 
+@pytest.mark.parametrize("exists,owner,profile,allowed", [
+    (False, "", IndexProfile.PARENT_CHILD, True),
+    (True, "riskmind:index-profile:parent-child-v1", IndexProfile.PARENT_CHILD, True),
+    (True, "riskmind:index-profile:baseline-v1", IndexProfile.PARENT_CHILD, False),
+    (True, "", IndexProfile.BASELINE, True),
+    (True, "", IndexProfile.PARENT_CHILD, False),
+])
+def test_preflight_is_read_only(exists, owner, profile, allowed):
+    client = FakeMilvusClient(collection_exists=exists)
+    client.schema_options["description"] = owner
+    if allowed:
+        milvus.validate_collection_for_profile(client, "target", profile)
+    else:
+        with pytest.raises(ValueError, match="another or unknown index profile"):
+            milvus.validate_collection_for_profile(client, "target", profile)
+    assert not client.created and not client.loaded and not client.upserts and not client.flushed
+
+
 def test_new_collection_carries_profile_identity_without_changing_vector_fields():
     baseline, pc = FakeMilvusClient(), FakeMilvusClient()
     milvus.ensure_collection(baseline, "baseline", index_profile=IndexProfile.BASELINE)

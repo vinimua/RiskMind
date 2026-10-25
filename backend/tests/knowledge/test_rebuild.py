@@ -139,6 +139,7 @@ def test_empty_authoritative_store_creates_an_empty_collection(monkeypatch) -> N
     ) == 0
     assert client.calls == [
         ("has_collection", "riskmind_knowledge_v003"),
+        ("has_collection", "riskmind_knowledge_v003"),
         ("load", "riskmind_knowledge_v003"),
     ]
 

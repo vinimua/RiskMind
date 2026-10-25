@@ -238,6 +238,36 @@ class ProfileMilvus(FakeMilvusClient):
         super().flush(collection)
 
 
+@pytest.mark.parametrize("operation", [ingest_pending, rebuild_collection])
+@pytest.mark.parametrize("with_chunks", [False, True])
+def test_wrong_milvus_owner_never_commits_pg_binding(sessions, monkeypatch, operation, with_chunks):
+    from risk_platform.knowledge import milvus
+
+    async def inline(fn):
+        return fn()
+    monkeypatch.setattr(milvus, "acall", inline)
+
+    async def exercise():
+        if with_chunks:
+            await stage(sessions, document(), IndexProfile.PARENT_CHILD)
+        client = ProfileMilvus()
+        client.collections["pc"] = "riskmind:index-profile:baseline-v1"
+        embedder = FakeEmbeddingClient()
+        options = dict(index_profile=IndexProfile.PARENT_CHILD, session_factory=sessions,
+                       embedding_client=embedder, milvus_client=client)
+        with pytest.raises(ValueError, match="another or unknown index profile"):
+            await operation(collection="pc", **options)
+        async with sessions() as session:
+            assert list((await session.execute(select(KnowledgeCollectionRow))).scalars()) == []
+        assert not embedder.inputs and not client.upserts
+        assert client.collections == {"pc": "riskmind:index-profile:baseline-v1"}
+        assert await operation(collection="pc_new", **options) == int(with_chunks)
+        async with sessions() as session:
+            binding = await session.get(KnowledgeCollectionRow, "pc_new")
+            assert binding.index_profile == "parent-child-v1"
+    asyncio.run(exercise())
+
+
 def test_profile_ingestion_retry_and_rebuild_use_only_children(sessions, monkeypatch):
     from risk_platform.knowledge import milvus
 
@@ -270,7 +300,7 @@ def test_profile_ingestion_retry_and_rebuild_use_only_children(sessions, monkeyp
         async with sessions() as session:
             assert not await list_pending_chunks(session, limit=100, index_profile=IndexProfile.PARENT_CHILD)
             assert await list_pending_chunks(session, limit=100)  # Baseline is untouched.
-        with pytest.raises(ValueError, match="another profile or purpose"):
+        with pytest.raises(ValueError, match="another or unknown index profile"):
             await ingest_pending(**{**options, "index_profile": IndexProfile.BASELINE})
         with pytest.raises(ValueError, match="already has an ingestion target"):
             await ingest_pending(**{**options, "collection": "pc_other"})
