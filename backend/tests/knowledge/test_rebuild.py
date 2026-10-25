@@ -9,12 +9,16 @@ from .test_ingestion import (
     FakeMilvusClient,
     FakeSession,
     _row,
+    allow_collection_writes,
 )
 
 
 @pytest.fixture(autouse=True)
 def isolated_collection_binding(monkeypatch):
     monkeypatch.setattr(ingestion, "bind_collection", AsyncMock())
+    monkeypatch.setattr(ingestion, "collection_write_guard", allow_collection_writes)
+    monkeypatch.setattr(ingestion, "validate_serving_collection", AsyncMock())
+    monkeypatch.setattr(ingestion, "get_accepted_build", AsyncMock(return_value=None))
 
 
 def test_rebuild_pages_pending_and_ready_without_changing_status(monkeypatch) -> None:

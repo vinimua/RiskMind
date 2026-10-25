@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import StrEnum
 
 from sqlalchemy import (
-    CheckConstraint, DateTime, ForeignKeyConstraint, Index, Integer,
+    Boolean, CheckConstraint, DateTime, ForeignKeyConstraint, Index, Integer,
     String, Text, UniqueConstraint, func, text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -170,6 +170,7 @@ class KnowledgeCollectionRow(Base):
 
     __tablename__ = "knowledge_collections"
     __table_args__ = (
+        UniqueConstraint("collection", "index_profile", name="uq_knowledge_collections_profile"),
         CheckConstraint("purpose IN ('INGESTION', 'REBUILD')", name="ck_knowledge_collections_purpose"),
         CheckConstraint(
             "index_profile IN ('baseline-v1', 'parent-child-v1')",
@@ -184,3 +185,64 @@ class KnowledgeCollectionRow(Base):
     collection: Mapped[str] = mapped_column(String(255), primary_key=True)
     index_profile: Mapped[str] = mapped_column(String(64), nullable=False)
     purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
+class KnowledgeCollectionBuildRow(Base):
+    """Successful, immutable materialization acceptance; failures are not eligible."""
+
+    __tablename__ = "knowledge_collection_builds"
+    __table_args__ = (
+        ForeignKeyConstraint(["collection", "index_profile"],
+                             ["knowledge_collections.collection", "knowledge_collections.index_profile"]),
+        UniqueConstraint("build_id", "index_profile", "collection", name="uq_knowledge_collection_build_identity"),
+        UniqueConstraint("collection", name="uq_knowledge_collection_build_collection"),
+        CheckConstraint("source_chunk_count >= 0", name="ck_collection_build_count"),
+        CheckConstraint("build_complete AND validation_status = 'PASSED'", name="ck_collection_build_passed"),
+    )
+    build_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    collection: Mapped[str] = mapped_column(String(255), nullable=False)
+    index_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_chunk_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    authoritative_snapshot_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    validation_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    build_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    validation_status: Mapped[str] = mapped_column(String(16), nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    validated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class KnowledgeServingActivationRow(Base):
+    """Append-only activation history and idempotency receipt."""
+
+    __tablename__ = "knowledge_serving_activations"
+    __table_args__ = (
+        ForeignKeyConstraint(["build_id", "index_profile", "collection"],
+                             ["knowledge_collection_builds.build_id", "knowledge_collection_builds.index_profile",
+                              "knowledge_collection_builds.collection"]),
+        UniqueConstraint("index_profile", "route_version", name="uq_serving_activation_version"),
+        CheckConstraint("route_version > 0", name="ck_serving_activation_version"),
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    index_profile: Mapped[str] = mapped_column(String(64), nullable=False)
+    collection: Mapped[str] = mapped_column(String(255), nullable=False)
+    build_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    route_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    activated_by: Mapped[str] = mapped_column(String(128), nullable=False)
+
+
+class KnowledgeServingRouteRow(Base):
+    __tablename__ = "knowledge_serving_routes"
+    __table_args__ = (
+        ForeignKeyConstraint(["index_profile", "route_version"],
+                             ["knowledge_serving_activations.index_profile", "knowledge_serving_activations.route_version"]),
+        ForeignKeyConstraint(["build_id", "index_profile", "collection"],
+                             ["knowledge_collection_builds.build_id", "knowledge_collection_builds.index_profile",
+                              "knowledge_collection_builds.collection"]),
+    )
+    index_profile: Mapped[str] = mapped_column(String(64), primary_key=True)
+    collection: Mapped[str] = mapped_column(String(255), nullable=False)
+    build_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    route_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    activated_by: Mapped[str] = mapped_column(String(128), nullable=False)

@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from risk_platform.knowledge import cli, ingestion, milvus
-from risk_platform.knowledge.models import KnowledgeChunkRow, KnowledgeCollectionRow
+from risk_platform.knowledge.models import KnowledgeChunkRow, KnowledgeCollectionRow, KnowledgeCollectionBuildRow
 
 
 pytestmark = pytest.mark.skipif(
@@ -46,6 +46,9 @@ async def _cleanup(document_ids: set[str], collections: tuple[str, str]) -> None
     try:
         async with sessions() as session:
             async with session.begin():
+                await session.execute(delete(KnowledgeCollectionBuildRow).where(
+                    KnowledgeCollectionBuildRow.collection.in_(collections),
+                ))
                 await session.execute(delete(KnowledgeCollectionRow).where(
                     KnowledgeCollectionRow.collection.in_(collections),
                 ))

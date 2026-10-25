@@ -48,8 +48,8 @@ class AsyncFacade:
             return None
         return self.session.execute(statement, parameters or {})
 
-    async def get(self, model, key):
-        return self.session.get(model, key)
+    async def get(self, model, key, **kwargs):
+        return self.session.get(model, key, **kwargs)
 
     def add(self, row):
         self.session.add(row)
@@ -231,6 +231,16 @@ class ProfileMilvus(FakeMilvusClient):
 
     def describe_collection(self, collection):
         return {"collection_name": collection, "description": self.collections[collection]}
+
+    def _rows(self, collection):
+        return {row["chunk_id"]: row for name, rows in self.upserts if name == collection for row in rows}
+
+    def query(self, collection, **_kwargs):
+        return [{"count(*)": len(self._rows(collection))}]
+
+    def get(self, collection, *, ids, output_fields, **_kwargs):
+        rows = self._rows(collection)
+        return [{field: rows[key][field] for field in output_fields} for key in ids if key in rows]
 
     def flush(self, collection):
         if self.fail_flush:

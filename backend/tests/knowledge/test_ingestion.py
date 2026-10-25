@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from contextlib import asynccontextmanager
 
 import pytest
 
@@ -11,6 +12,12 @@ from risk_platform.knowledge import ingestion
 def isolated_collection_binding(monkeypatch):
     # Binding SQL has independent relational tests; these tests isolate task retry.
     monkeypatch.setattr(ingestion, "bind_collection", AsyncMock())
+    monkeypatch.setattr(ingestion, "collection_write_guard", allow_collection_writes)
+
+
+@asynccontextmanager
+async def allow_collection_writes(*_args):
+    yield
 
 
 class FakeSession:

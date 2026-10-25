@@ -25,6 +25,17 @@ class DocumentVersionConflictError(ValueError):
     """Raised when an existing document version is staged with different data."""
 
 
+async def lock_profile_source(
+    session: AsyncSession, profile: IndexProfile, *, shared: bool = False,
+) -> None:
+    """Writers share this lock; serving acceptance/activation take it exclusively."""
+    function = "pg_advisory_xact_lock_shared" if shared else "pg_advisory_xact_lock"
+    await session.execute(
+        text(f"SELECT {function}(hashtextextended(:key, 0))"),
+        {"key": f"riskmind:knowledge-source:{profile.value}"},
+    )
+
+
 def _canonical(value: BaseModel) -> str:
     return json.dumps(value.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -205,6 +216,8 @@ async def _stage_chunks(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
         {"lock_key": f"riskmind:knowledge:{document_id}:{document_version}"},
     )
+    # Shared with serving validation/activation, which take the exclusive form.
+    await lock_profile_source(session, index_profile, shared=True)
     if index_profile == IndexProfile.BASELINE:
         source = await session.get(KnowledgeDocumentRow, (document_id, document_version))
         if source is not None:
@@ -300,7 +313,7 @@ async def list_rebuild_chunks(
     if after_chunk_id is not None:
         statement = statement.where(KnowledgeChunkRow.chunk_id > after_chunk_id)
     result = await session.execute(
-        statement.order_by(KnowledgeChunkRow.chunk_id).limit(limit)
+        statement.order_by(KnowledgeChunkRow.chunk_id).limit(limit).execution_options(populate_existing=True)
     )
     return list(result.scalars())
 

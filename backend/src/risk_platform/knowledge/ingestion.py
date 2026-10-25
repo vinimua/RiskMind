@@ -17,6 +17,7 @@ from risk_platform.knowledge.repository import (
     bind_collection,
 )
 from risk_platform.knowledge.indexing.profiles import IndexProfile
+from risk_platform.knowledge.serving import collection_write_guard, get_accepted_build, validate_serving_collection
 
 
 DEFAULT_BATCH_SIZE = 32
@@ -55,13 +56,14 @@ async def ingest_pending(
         if not pending:
             return completed
 
-        await _embed_and_upsert(
-            pending,
-            collection=collection,
-            embedding_client=embedding_client,
-            milvus_client=milvus_client,
-            index_profile=profile,
-        )
+        async with collection_write_guard(sessions, collection):
+            await _embed_and_upsert(
+                pending,
+                collection=collection,
+                embedding_client=embedding_client,
+                milvus_client=milvus_client,
+                index_profile=profile,
+            )
 
         async with sessions() as session:
             async with session.begin():
@@ -95,6 +97,13 @@ async def rebuild_collection(
                 session, collection=collection, index_profile=profile, purpose="REBUILD",
             )
     async with sessions() as session:
+        accepted = await get_accepted_build(session, collection)
+    if accepted is not None:
+        receipt = await validate_serving_collection(
+            collection=collection, index_profile=profile, session_factory=sessions, milvus_client=milvus_client,
+        )
+        return receipt.source_chunk_count
+    async with sessions() as session:
         expected_count = await count_chunks(session, index_profile=profile)
     after_chunk_id = None
     written = 0
@@ -116,15 +125,20 @@ async def rebuild_collection(
                 raise RuntimeError(
                     "authoritative knowledge changed during rebuild; rerun rebuild"
                 )
+            await validate_serving_collection(
+                collection=collection, index_profile=profile,
+                session_factory=sessions, milvus_client=milvus_client,
+            )
             return written
 
-        await _embed_and_upsert(
-            chunks,
-            collection=collection,
-            embedding_client=embedding_client,
-            milvus_client=milvus_client,
-            index_profile=profile,
-        )
+        async with collection_write_guard(sessions, collection):
+            await _embed_and_upsert(
+                chunks,
+                collection=collection,
+                embedding_client=embedding_client,
+                milvus_client=milvus_client,
+                index_profile=profile,
+            )
         written += len(chunks)
         after_chunk_id = chunks[-1].chunk_id
 
