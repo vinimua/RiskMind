@@ -1,0 +1,216 @@
+{
+  "dataset_id": "riskmind-synthetic-reports-v1",
+  "annotation_notes": "Hand-selected verbatim relevant passages from two synthetic fixtures. Preliminary incomplete relevance judgments requiring domain review. Whole-quote availability is neither Evidence Recall nor answer correctness; no production generalization.",
+  "documents": [
+    {
+      "document_id": "MODEL-DEV-credit_v3",
+      "document_version": "v1",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "title": "credit_v3 模型开发报告（Synthetic Fixture）",
+      "source_uri": "knowledge://fixtures/MODEL-DEV-credit_v3",
+      "model_id": "credit_v3",
+      "pages": [
+        {
+          "content": "# credit_v3 模型开发报告（Synthetic Fixture）\n\n<!--\nSynthetic fixture for RiskMind tests. Not production data.\nDocument type: MODEL_DEVELOPMENT_REPORT.\n-->\n\n---\n\n## 修订历史\n\n| 版本编号 | 变化状态 | 简要说明（变更内容和变更范围） | 日期 | 变更人 |\n|---|---|---|---|---|\n| 1.0 | C | 创建 credit_v3 模型开发报告测试样本 | 2026-09-30 | RiskMind Test Fixture |\n| 1.1 | M | 补充跨时间验证与特征稳定性说明 | 2026-10-05 | RiskMind Test Fixture |\n\n变化状态：\n\n- C：创建\n- A：增加\n- M：修改\n- D：删除\n\n---\n\n# 1 报告框架\n\n本文档描述 `credit_v3` 信贷风险评分模型的开发范围、数据处理方法、模型设计方案和离线评估结果。\n\n该模型用于在授信申请阶段评估申请人的违约风险，并输出风险评分，供后续授信策略和额度策略使用。\n\n## 1.1 项目目标\n\n当前授信业务使用的 `credit_v2` 模型已运行超过 18 个月。随着业务渠道扩展以及新客占比上升，部分客群上的风险区分能力开始下降。\n\n本项目的主要目标包括：\n\n- 建立新的申请评分模型 `credit_v3`；\n- 提升对新增线上渠道客群的风险区分能力；\n- 降低对单一传统征信变量的依赖；\n- 引入更多申请行为与近期查询行为特征；\n- 为后续模型监控提供明确的开发期性能基线。\n\n模型主要解决的问题为：\n\n> 在客户提交授信申请时，根据申请信息、征信信息和近期行为信息，对未来 30 天内发生逾期的风险进行排序。\n\n## 1.2 模型适用范围\n\n`credit_v3` 适用于个人消费信贷产品的首次授信申请。\n\n适用范围：\n\n- 个人客户；\n- 首次授信申请；\n- 线上直营渠道；\n- 合作渠道；\n- 申请时可获得完整申请表、征信及行为信息的客户。\n\n当前模型不适用于：\n\n- 存量客户额度调整；\n- 已进入贷后阶段的客户；\n- 企业客户；\n- 缺少核心征信字段的特殊申请场景；\n- 人工特批流程。\n\n模型输出用于风险排序和策略分层，不直接作为单一自动审批依据。\n\n---\n\n# 2 数据获取和分析\n\n## 2.1 数据来源\n\n模型开发数据来自以下三个模拟数据源：\n\n1. **申请信息表**\n   - 客户申请时间；\n   - 年龄；\n   - 收入；\n   - 职业类型；\n   - 申请金额；\n   - 申请渠道。\n\n2. **征信信息表**\n   - 当前未结清贷款数量；\n   - 最近 6 个月征信查询次数；\n   - 历史逾期次数；\n   - 信用历史长度；\n   - 当前负债水平。\n\n3. **行为信息表**\n   - 最近 7 天申请次数；\n   - 最近 30 天申请次数；\n   - 最近 30 天设备变更次数；\n   - 最近 30 天登录天数。\n\n数据时间范围：\n\n- 开发样本时间：2025-01-01 至 2025-09-30；\n- 跨时间验证样本时间：2025-10-01 至 2025-12-31；\n- 标签观察窗口：申请后 30 天。\n\n目标变量定义：\n\n- 坏样本：申请后 30 天内出现 `DPD >= 7`；\n- 好样本：完成 30 天观察且未出现 `DPD >= 7`；\n- 标签未成熟样本：不进入模型训练和正式评估。\n\n## 2.2 数据预处理\n\n模型开发阶段执行以下数据预处理步骤：\n\n### 缺失值处理\n\n- 数值型变量使用业务含义明确的缺失标记值；\n- 类别型变量统一映射为 `UNKNOWN`；\n- 对缺失率超过 80% 且无明确业务价值的变量直接剔除。\n\n### 异常值处理\n\n- 对收入、申请金额等长尾数值变量进行上下分位点截断；\n- 对明显错误的年龄值进行规则过滤；\n- 对不符合枚举范围的渠道编码统一映射为 `OTHER`。\n\n### 样本去重\n\n以 `application_id` 作为申请唯一标识。\n\n重复申请记录按照数据入库时间保留最新记录。\n\n### 标签处理\n\n只有完成完整 30 天表现窗口的样本才进入模型训练与验证。\n\n标签未成熟样本不得作为模型效果下降的判断依据。\n\n## 2.3 数据统计特征\n\n模型开发阶段重点关注变量缺失率、均值、标准差和分布稳定性。\n\n以下为部分模拟特征统计：\n\n| 特征名称 | 类型 | 缺失率 | 均值 | 标准差 |\n|---|---|---:|---:|---:|\n| age | 数值型 | 0.1% | 34.8 | 8.6 |\n| monthly_income | 数值型 | 3.2% | 10250 | 6150 |\n| apply_cnt_30d | 数值型 | 0.0% | 2.8 | 3.1 |\n| credit_query_cnt_6m | 数值型 | 1.4% | 5.7 | 4.2 |\n| debt_ratio | 数值型 | 4.8% | 0.42 | 0.19 |\n| credit_history_months | 数值型 | 2.1% | 47.6 | 31.4 |\n| channel_code | 类别型 | 0.0% | - | - |\n\n初步分析发现：\n\n- `apply_cnt_30d` 与坏样本率呈明显正相关；\n- `debt_ratio` 在高风险样本中的分布整体右移；\n- `credit_history_months` 较短的客户风险相对较高；\n- 不同渠道的基础坏样本率存在明显差异。\n\n## 2.4 数据划分\n\n开发样本按照时间和用途划分为训练集、测试集和跨时间验证集。\n\n| 样本集 | 好样本 | 坏样本 | 总量 | 坏占比 |\n|---|---:|---:|---:|---:|\n| 训练集 | 75,520 | 8,480 | 84,000 | 10.10% |\n| 测试集 | 24,910 | 3,090 | 28,000 | 11.04% |\n| 跨时间验证集 | 26,610 | 3,390 | 30,000 | 11.30% |\n| 总计 | 127,040 | 14,960 | 142,000 | 10.54% |\n\n训练集与测试集来自同一开发时间窗口，按分层随机方式划分。\n\n跨时间验证集完全来自后续时间窗口，用于检查模型性能和排序能力在时间变化下的稳定性。\n\n---\n\n# 3 模型设计\n\n## 3.1 模型选型\n\n本项目比较了以下候选模型：\n\n- Logistic Regression；\n- Random Forest；\n- Gradient Boosting Decision Tree；\n- LightGBM。\n\n综合比较模型效果、稳定性、训练效率和解释能力后，最终选择 LightGBM 作为 `credit_v3` 的主模型。\n\n主要原因：\n\n- 对非线性关系具有较好的拟合能力；\n- 能够自然处理特征之间的交互关系；\n- 对不同类型特征具有较好的适应能力；\n- 在测试集和跨时间验证集上表现较稳定；\n- 特征重要性和 SHAP 分析可支持模型解释。\n\n## 3.2 模型架构\n\n`credit_v3` 使用基于梯度提升树的二分类模型。\n\n模型输入为经过预处理和特征筛选后的申请、征信和行为特征。\n\n整体流程如下：\n\n```text\n申请信息\n   │\n征信信息\n   │\n行为信息\n   │\n   ▼\n数据预处理\n   │\n   ▼\n特征工程\n   │\n   ▼\nLightGBM\n   │\n   ▼\n违约概率\n   │\n   ▼\n风险评分\n```\n\n模型输出为申请客户未来 30 天内发生目标违约事件的预测概率。\n\n为了便于业务使用，预测概率进一步映射为统一风险评分。\n\n## 3.3 特征工程\n\n模型开发阶段共生成 126 个候选特征。\n\n经过缺失率、稳定性、相关性和模型贡献度筛选后，最终保留 38 个特征。\n\n主要特征类别包括：\n\n### 申请属性类\n\n- age；\n- monthly_income；\n- requested_amount；\n- occupation_type；\n- channel_code。\n\n### 征信行为类\n\n- credit_query_cnt_6m；\n- active_loan_cnt；\n- historical_overdue_cnt；\n- debt_ratio；\n- credit_history_months。\n\n### 近期申请行为类\n\n- apply_cnt_7d；\n- apply_cnt_30d；\n- device_change_cnt_30d；\n- login_days_30d。\n\n### 特征筛选原则\n\n以下类型的特征不进入最终模型：\n\n- 缺失率过高；\n- 开发样本中取值近似常量；\n- 与其他变量高度重复；\n- 明显存在未来信息泄漏；\n- 在跨时间样本中分布极不稳定；\n- 缺乏明确业务解释。\n\n其中 `apply_cnt_30d`、`debt_ratio`、`credit_query_cnt_6m` 和 `credit_history_months` 在最终模型中具有较高贡献度。\n\n---\n\n# 4 模型评估\n\n## 4.1 评估指标\n\n本模型主要使用以下指标进行离线评估：\n\n- KS：衡量好坏样本的区分能力；\n- AUC：衡量模型整体排序能力；\n- PSI：用于辅助观察模型输入和评分分布的稳定性。\n\n其中 KS 和 AUC 用于开发期模型效果比较，PSI 主要用于稳定性分析和后续线上监控。\n\n## 4.2 评估结果\n\n模拟评估结果如下：\n\n| 指标名称 | 训练样本 | 测试样本 | 跨时间验证样本 |\n|---|---:|---:|---:|\n| KS | 0.487 | 0.452 | 0.431 |\n| AUC | 0.812 | 0.793 | 0.781 |\n| Score PSI | - | 0.028 | 0.067 |\n\n从结果来看：\n\n- 训练集 KS 为 0.487；\n- 测试集 KS 为 0.452；\n- 跨时间验证集 KS 为 0.431；\n- 测试集和跨时间验证集的模型排序能力相对稳定；\n- 跨时间样本 Score PSI 为 0.067，未观察到明显评分分布异常。\n\n## 4.3 结果分析\n\n`credit_v3` 在测试集和跨时间验证集上均保持了较好的风险区分能力。\n\n与训练集相比，测试集和跨时间验证集的 KS 有一定下降，但下降幅度处于开发期预期范围内，没有观察到明显的过拟合迹象。\n\n跨时间验证结果显示：\n\n- 新时间窗口内的 AUC 仍保持在 0.78 左右；\n- Score PSI 低于 0.10；\n- 模型整体排序能力未出现明显失效。\n\n模型当前主要不足包括：\n\n1. 对征信历史较短的新客户，部分风险变量的信息量有限；\n2. 部分合作渠道样本数量较少，渠道级评估结果存在一定波动；\n3. `apply_cnt_30d` 等近期行为变量对数据链路完整性较敏感；\n4. 标签成熟度不足时，不能直接使用短期样本评价模型线上真实效果。\n\n因此，模型上线后建议重点监控：\n\n- 总体 KS / AUC；\n- 不同渠道 KS；\n- 不同客群评分分布；\n- `apply_cnt_30d` 等关键特征的 PSI；\n- 标签成熟度；\n- 数据缺失率和数据链路完整性。\n\n---\n\n## 文档说明\n\n本文档为 RiskMind 开发测试使用的模拟模型开发报告。\n\n其作用包括：\n\n- Stage 4 deterministic chunking 测试；\n- section hierarchy 测试；\n- 表格切分测试；\n- 稳定 `chunk_id` 测试；\n- Stage 5 ingestion 测试；\n- Stage 6 Dense Retrieval 基础评估样本。\n\n本文档不得被解释为真实生产模型的开发报告或真实业务数据。\n",
+          "page_number": null
+        }
+      ]
+    },
+    {
+      "document_id": "CASE-2026-018",
+      "document_version": "v1",
+      "document_type": "INCIDENT_REPORT",
+      "title": "credit_v3 模型异常调查报告（Synthetic Fixture）",
+      "source_uri": "knowledge://fixtures/CASE-2026-018",
+      "model_id": "credit_v3",
+      "pages": [
+        {
+          "content": "# credit_v3 模型异常调查报告（Synthetic Fixture）\n\n<!--\nSynthetic fixture for RiskMind tests. Not production data.\nDocument type: INCIDENT_REPORT.\n-->\n\n---\n\n# 1 Case 概览\n\n## 1.1 基本信息\n\n- Case ID：`CASE-2026-018`\n- 模型名称 / Model ID：`credit_v3`\n- 模型版本：`v3.2`\n- 发现时间：2026-09-18 09:30\n- 触发来源：监控告警\n- 调查时间窗口：2026-09-01 至 2026-09-17\n- 负责人：RiskMind Test Fixture\n\n异常由线上模型性能监控触发。\n\n监控系统发现 `credit_v3` 在最近一个观察窗口内的 KS 明显低于开发期和前序稳定期水平，因此创建异常调查 Case。\n\n## 1.2 异常现象与影响\n\n### 异常现象\n\n监控告警显示：\n\n| 指标 | 参考值 | 当前值 | 变化 |\n|---|---:|---:|---:|\n| KS | 0.43 | 0.29 | -0.14 |\n| AUC | 0.78 | 0.70 | -0.08 |\n| Score PSI | 0.06 | 0.08 | +0.02 |\n\n其中 KS 从近期稳定水平约 `0.43` 下降至 `0.29`，降幅明显。\n\n初步观察发现：\n\n- Score PSI 仍低于 0.10；\n- 整体评分分布没有出现明显漂移；\n- 模型服务调用成功率正常；\n- 线上模型版本未发生异常切换。\n\n因此，本次调查重点关注：\n\n- 标签成熟度；\n- 数据完整性；\n- 模型与特征版本；\n- 客群和渠道结构；\n- 关键特征漂移。\n\n### 影响范围\n\n当前异常主要影响 `credit_v3` 的模型效果监控结果。\n\n调查初期尚未确认模型本身发生真实退化，因此暂未触发模型下线或回滚。\n\n受影响范围：\n\n- 模型：`credit_v3`\n- 版本：`v3.2`\n- 业务：个人消费信贷首次授信\n- 主要监控指标：KS、AUC\n- 时间窗口：2026-09-01 至 2026-09-17\n\n暂未发现：\n\n- 模型服务不可用；\n- 大面积评分异常；\n- 数据字段整体缺失；\n- 明显的业务审批结果突变。\n\n---\n\n# 2 调查过程\n\n## 2.1 调查思路与检查项\n\n### 检查项 1：标签成熟度\n\n**目的**\n\n确认当前用于模型效果评估的样本是否已经完成目标标签观察窗口。\n\n**方法**\n\n检查评估样本的申请日期、表现窗口和标签成熟状态。\n\n当前模型的目标标签定义为：\n\n> 申请后 30 天内是否出现 `DPD >= 7`。\n\n因此，只有完成完整 30 天观察窗口的样本才能进入正式模型效果评估。\n\n**结果**\n\n发现当前 KS 计算样本中包含大量尚未完成 30 天观察窗口的近期申请。\n\n当前评估样本约 18,400 条，其中：\n\n| 标签状态 | 样本数 | 占比 |\n|---|---:|---:|\n| 已成熟 | 11,960 | 65.0% |\n| 未成熟 | 6,440 | 35.0% |\n\n未成熟样本被临时按“未发生坏事件”计入结果，导致坏样本数量被低估。\n\n---\n\n### 检查项 2：模型与特征版本\n\n**目的**\n\n确认线上模型或特征逻辑是否发生版本错配。\n\n**方法**\n\n核对：\n\n- 模型版本；\n- 特征服务版本；\n- 特征配置版本；\n- 线上发布时间。\n\n**结果**\n\n核查结果如下：\n\n| 对象 | 预期版本 | 实际版本 | 结果 |\n|---|---|---|---|\n| 模型 | v3.2 | v3.2 | 一致 |\n| 特征服务 | feature-v12 | feature-v12 | 一致 |\n| 特征配置 | fv-202608 | fv-202608 | 一致 |\n\n未发现模型或特征版本错配。\n\n---\n\n### 检查项 3：数据质量\n\n**目的**\n\n确认 KS 下降是否由核心字段缺失、延迟或异常值引起。\n\n**方法**\n\n检查核心变量：\n\n- `apply_cnt_30d`\n- `credit_query_cnt_6m`\n- `debt_ratio`\n- `credit_history_months`\n\n重点比较当前窗口与参考窗口的：\n\n- 缺失率；\n- 异常值占比；\n- 数据延迟；\n- 样本覆盖率。\n\n**结果**\n\n核心字段缺失率整体稳定。\n\n| 特征 | 参考缺失率 | 当前缺失率 |\n|---|---:|---:|\n| apply_cnt_30d | 0.0% | 0.1% |\n| credit_query_cnt_6m | 1.4% | 1.5% |\n| debt_ratio | 4.8% | 4.9% |\n| credit_history_months | 2.1% | 2.0% |\n\n未发现足以解释 KS 大幅下降的数据质量异常。\n\n---\n\n### 检查项 4：客群与渠道结构\n\n**目的**\n\n判断近期新增渠道或客群变化是否导致模型效果下降。\n\n**方法**\n\n比较参考窗口和当前窗口的渠道占比及主要客群占比。\n\n**结果**\n\n线上直营渠道占比从 72% 下降至 68%，合作渠道从 28% 上升至 32%。\n\n结构发生一定变化，但幅度有限。\n\n分渠道重新计算成熟样本 KS 后：\n\n| 渠道 | 成熟样本 KS |\n|---|---:|\n| 线上直营 | 0.42 |\n| 合作渠道 | 0.39 |\n\n未观察到足以解释总体 KS 降至 0.29 的单一渠道异常。\n\n---\n\n### 检查项 5：关键特征漂移\n\n**目的**\n\n确认模型关键输入变量是否发生显著分布变化。\n\n**方法**\n\n计算主要特征 PSI。\n\n**结果**\n\n| 特征 | PSI |\n|---|---:|\n| apply_cnt_30d | 0.07 |\n| credit_query_cnt_6m | 0.05 |\n| debt_ratio | 0.04 |\n| credit_history_months | 0.03 |\n\n所有重点特征 PSI 均低于 0.10。\n\n未观察到显著特征漂移。\n\n## 2.2 关键发现\n\n| 序号 | 关键发现 | 来源 / 检查项 | 是否支持当前根因判断 |\n|---|---|---|---|\n| 1 | 35% 的效果评估样本尚未完成 30 天标签观察窗口 | 标签成熟度检查 | 是 |\n| 2 | 未成熟样本被临时作为非坏样本参与 KS 计算 | 标签成熟度检查 | 是 |\n| 3 | 模型和特征版本一致 | 版本检查 | 排除版本问题 |\n| 4 | 核心字段缺失率稳定 | 数据质量检查 | 排除主要数据质量问题 |\n| 5 | 关键特征 PSI 均低于 0.10 | 特征漂移检查 | 排除显著输入漂移 |\n| 6 | 渠道结构有轻微变化，但成熟样本分渠道 KS 基本稳定 | 客群与渠道检查 | 不足以解释异常 |\n\n---\n\n# 3 根因与证据\n\n## 3.1 根因结论\n\n- 根因：**标签成熟度不足导致模型效果指标被低估**\n- 根因状态：已确认\n- 是否存在多个共同因素：未发现对本次异常具有同等解释力的其他主要因素\n\n当前模型并未观察到明确的真实性能退化。\n\n本次 KS 异常主要由评估逻辑将大量尚未完成 30 天表现窗口的样本提前纳入模型效果计算造成。\n\n这些样本中的潜在坏客户尚未完成风险事件观察，因此当前坏样本率被系统性低估，进而导致 KS 和 AUC 指标出现异常下降。\n\n## 3.2 支持证据与排除项\n\n### 支持证据\n\n| 序号 | 证据 | 来源 | 与根因的关系 |\n|---|---|---|---|\n| 1 | 当前效果评估样本中 35% 标签未成熟 | 标签成熟度检查 | 直接支持 |\n| 2 | 未成熟样本被作为非坏样本参与指标计算 | 评估逻辑检查 | 直接支持 |\n| 3 | 仅使用成熟样本重新计算后 KS 恢复至 0.41 | 指标复算 | 强支持 |\n| 4 | 成熟样本 AUC 恢复至 0.77 | 指标复算 | 强支持 |\n\n使用仅包含成熟标签样本的数据重新计算：\n\n| 指标 | 原监控值 | 成熟样本复算值 | 参考水平 |\n|---|---:|---:|---:|\n| KS | 0.29 | 0.41 | 0.43 |\n| AUC | 0.70 | 0.77 | 0.78 |\n\n复算结果重新接近历史稳定水平。\n\n### 排除项\n\n| 序号 | 排除方向 | 排除依据 |\n|---|---|---|\n| 1 | 模型版本错误 | 线上版本与预期版本均为 v3.2 |\n| 2 | 特征版本错误 | 特征服务和配置版本均一致 |\n| 3 | 核心数据质量异常 | 关键字段缺失率和异常率稳定 |\n| 4 | 显著特征漂移 | 重点特征 PSI 均低于 0.10 |\n| 5 | 单一渠道恶化 | 成熟样本分渠道 KS 未出现严重下降 |\n\n---\n\n# 4 处置与验证\n\n## 4.1 处置措施\n\n| 序号 | 处置措施 | 类型 | 负责人 | 状态 |\n|---|---|---|---|---|\n| 1 | KS/AUC 计算只纳入完成 30 天表现窗口的成熟样本 | 临时 | RiskMind Test Fixture | 已完成 |\n| 2 | 在模型监控前增加标签成熟度检查 | 长期 | RiskMind Test Fixture | 已完成 |\n| 3 | 当成熟样本比例低于阈值时不输出正式模型退化结论 | 长期 | RiskMind Test Fixture | 已完成 |\n| 4 | 在监控结果中展示成熟样本数和成熟率 | 长期 | RiskMind Test Fixture | 已完成 |\n\n本次事件未执行：\n\n- 模型回滚；\n- 模型重新训练；\n- 特征版本回退；\n- 模型参数调整。\n\n原因是当前证据不支持“模型本身已经退化”的结论。\n\n## 4.2 验证结果\n\n- 验证时间：2026-09-20\n- 验证方法：仅使用标签成熟样本重新计算 KS 和 AUC\n- 指标恢复情况：\n  - KS：0.29 → 0.41\n  - AUC：0.70 → 0.77\n- 是否达到预期：是\n- 是否仍存在遗留风险：是，近期样本仍需等待完整标签成熟\n\n### 验证结论\n\n在排除未成熟样本后，模型性能指标恢复至接近参考水平。\n\n现有证据支持：\n\n> 本次监控异常由标签成熟度不足和评估样本选择逻辑导致，而非 `credit_v3` 模型本身发生明显性能退化。\n\n该 Case 可以关闭，但后续仍需观察新的成熟样本窗口，确认指标持续稳定。\n\n---\n\n# 5 经验沉淀\n\n## 5.1 可复用经验\n\n本次 Case 可沉淀以下调查经验：\n\n1. **模型效果下降时，应优先检查标签成熟度。**\n\n   对需要未来表现窗口定义标签的信贷模型，近期样本不能直接用于正式效果判断。\n\n2. **模型效果指标异常不等于模型真实退化。**\n\n   KS、AUC 下降可能来自样本定义、标签状态、数据质量或监控逻辑问题。\n\n3. **应在复杂调查前先排除基础条件问题。**\n\n   标签成熟度、模型版本、特征版本和数据完整性属于成本较低但解释力较强的优先检查项。\n\n4. **历史 Case 只能提供调查方向。**\n\n   后续再次出现 KS 下降时，可以优先检查标签成熟度，但不能因为本 Case 的根因为标签成熟度，就直接判定新 Case 具有相同根因。\n\n5. **应保留排除项。**\n\n   模型版本、数据质量、渠道变化和特征漂移虽然不是本次根因，但这些排除过程对于未来类似 Case 仍具有检索价值。\n\n## 5.2 后续监控建议\n\n建议对模型效果监控增加以下约束：\n\n- 展示当前成熟样本数量；\n- 展示成熟样本比例；\n- 标签成熟率不足时将模型效果状态标记为“证据不足”；\n- 避免使用未成熟样本直接触发模型退化结论；\n- 持续监控总体 KS / AUC；\n- 持续监控渠道级 KS；\n- 继续监控关键特征 PSI；\n- 对标签成熟度异常建立独立监控项。\n\n---\n\n## 文档说明\n\n本文档为 RiskMind 开发测试使用的模拟模型故障 / 根因调查报告。\n\n其作用包括：\n\n- Stage 4 deterministic chunking 测试；\n- `section_path` 测试；\n- 调查过程长文本切分测试；\n- 表格切分测试；\n- 稳定 `chunk_id` 测试；\n- Stage 5 ingestion 测试；\n- Stage 6 历史相似 Case Dense Retrieval 测试；\n- 后续 Replanning 对历史调查经验的使用测试。\n\n本文档中的所有业务数据和结论均为模拟内容，不得被解释为真实生产事件。\n",
+          "page_number": null
+        }
+      ]
+    }
+  ],
+  "questions": [
+    {
+      "question_id": "incident-root-cause",
+      "request": {
+        "query": "credit_v3 的 KS、AUC 为什么下降？根因机制和复算证据是什么？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "incident-root-cause-1",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "标签成熟度不足导致模型效果指标被低估"
+        },
+        {
+          "quote_id": "incident-root-cause-2",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "未成熟样本被临时按“未发生坏事件”计入结果，导致坏样本数量被低估。"
+        },
+        {
+          "quote_id": "incident-root-cause-3",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "| KS | 0.29 | 0.41 | 0.43 |"
+        },
+        {
+          "quote_id": "incident-root-cause-4",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "| AUC | 0.70 | 0.77 | 0.78 |"
+        }
+      ]
+    },
+    {
+      "question_id": "incident-maturity",
+      "request": {
+        "query": "CASE-2026-018 有多少标签尚未成熟，影响是什么？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "incident-maturity-1",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "| 未成熟 | 6,440 | 35.0% |"
+        },
+        {
+          "quote_id": "incident-maturity-2",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "未成熟样本被临时按“未发生坏事件”计入结果，导致坏样本数量被低估。"
+        }
+      ]
+    },
+    {
+      "question_id": "incident-action",
+      "request": {
+        "query": "这次异常是否应该回滚模型，后续应采取哪些监控措施？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "incident-action-1",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "调查初期尚未确认模型本身发生真实退化，因此暂未触发模型下线或回滚。"
+        },
+        {
+          "quote_id": "incident-action-2",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "在模型监控前增加标签成熟度检查"
+        },
+        {
+          "quote_id": "incident-action-3",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "在监控结果中展示成熟样本数和成熟率"
+        }
+      ]
+    },
+    {
+      "question_id": "incident-validation",
+      "request": {
+        "query": "仅使用成熟标签样本验证后 KS 和 AUC 恢复到多少？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "incident-validation-1",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "| KS | 0.29 | 0.41 | 0.43 |"
+        },
+        {
+          "quote_id": "incident-validation-2",
+          "document_id": "CASE-2026-018",
+          "document_version": "v1",
+          "text": "| AUC | 0.70 | 0.77 | 0.78 |"
+        }
+      ]
+    },
+    {
+      "question_id": "development-label",
+      "request": {
+        "query": "credit_v3 的坏样本如何定义？哪些样本可以进入训练和验证？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "development-label-1",
+          "document_id": "MODEL-DEV-credit_v3",
+          "document_version": "v1",
+          "text": "坏样本：申请后 30 天内出现 `DPD >= 7`"
+        },
+        {
+          "quote_id": "development-label-2",
+          "document_id": "MODEL-DEV-credit_v3",
+          "document_version": "v1",
+          "text": "只有完成完整 30 天表现窗口的样本才进入模型训练与验证。"
+        }
+      ]
+    },
+    {
+      "question_id": "development-selection",
+      "request": {
+        "query": "credit_v3 最终选择了什么模型，筛选后保留多少特征？",
+        "filters": {
+          "document_types": [],
+          "document_id": null,
+          "model_id": null,
+          "document_version": null
+        },
+        "top_k": 5
+      },
+      "relevant_quotes": [
+        {
+          "quote_id": "development-selection-1",
+          "document_id": "MODEL-DEV-credit_v3",
+          "document_version": "v1",
+          "text": "综合比较模型效果、稳定性、训练效率和解释能力后，最终选择 LightGBM 作为 `credit_v3` 的主模型。"
+        },
+        {
+          "quote_id": "development-selection-2",
+          "document_id": "MODEL-DEV-credit_v3",
+          "document_version": "v1",
+          "text": "经过缺失率、稳定性、相关性和模型贡献度筛选后，最终保留 38 个特征。"
+        }
+      ]
+    }
+  ]
+}

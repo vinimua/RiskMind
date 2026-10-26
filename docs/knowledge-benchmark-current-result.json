@@ -1,0 +1,14 @@
+{
+  "status": "INCONCLUSIVE",
+  "dataset_id": "riskmind-synthetic-reports-v1",
+  "dataset_digest": "c1af0bed035b8b335ff85ab1c72eb72c79dd1dfd93181eecabc42bdda7ad7931",
+  "started_at": "2026-10-25T09:25:54.303064+00:00",
+  "embedding_model": "BAAI/bge-m3",
+  "embedding_dimension": 1024,
+  "python": "3.11.9",
+  "tokenizer_sha256": null,
+  "scope": "synthetic exact-quote context availability; no answer/evidence qualification",
+  "stage": "embedding_configuration",
+  "error_type": "RuntimeError",
+  "error": "Benchmark incomplete; check credentials, dependencies, corpus and serving routes."
+}
