@@ -401,10 +401,11 @@ Formulation，将 objective 转成 candidate request 后交给 7A，不直接把
 每个 task_id 对应一条 TaskExecutionResult，写入 State；零命中成功仍映射任务 COMPLETED，
 FAILED/REJECTED 映射任务 FAILED，具体原因保留在结构化结果中。
 可信 context/authorize 由构图调用方注入，不放入模型可写 State；图使用 ainvoke。
-尚未实现 Observation 解释、真实 Replanning、通用 Capability Router/Tool Registry 或持久化。
+Stage 7C 已接入结构化 Observation 与确定性执行/来源引用校验。
+尚未实现真实 Replanning、通用 Capability Router/Tool Registry 或持久化。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
-后续按小步推进：7C 实现带执行引用的结构化 Observation；
+后续按小步推进：
 Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B 前的语义修复已移除
 `investigation_complete`：本轮骨架退出使用 `round_complete=True`，案件保持
 `investigation_status=OPEN`。7B 的轮次结束也不表示每个任务成功或案件调查完成。
@@ -450,8 +451,9 @@ V1 不允许 Agent 自由拼接 SQL、Shell 或任意代码。
 
 Task Execution 后的结果不统一直接叫 Evidence。
 
-当前代码中的 `observation` 仍是 V0 placeholder，尚未定义正式 Observation 契约。实现时
-必须保持工具原始结果、Observation 与正式 Evidence 三种语义分离。
+Stage 7C 的 `observation` 已实现：先确定性检查本轮任务与执行结果一一关联，再由同一个
+Investigation Agent 解释真实知识，最后核对 execution/context/Child 来源和原文引句。
+始终保持工具原始结果、Observation 与正式 Evidence 三种语义分离。
 
 不同能力输出保持不同语义：
 
@@ -474,28 +476,29 @@ Observation 表示：
 
 > **本轮工具执行后系统观察到了什么。**
 
-统一结构可定义为：
+当前首轮知识 Observation 结构为：
 
 ```text
 Observation
 ├── observation_id
-├── task_id
-├── result_type
-├── producer
-├── payload
-├── source_refs[]
+├── execution_refs[]
+├── execution_summaries[]（系统生成）
+├── findings[]（statement / execution_refs / sources / limitation）
+├── knowledge_gaps[]
+├── next_step_suggestions[]
+├── narrative
 ├── created_at
-└── status
+├── knowledge_scope = HISTORICAL_KNOWLEDGE_ONLY
+├── status = SUCCEEDED / INCONCLUSIVE
+└── error?
 ```
 
-其中：
-
-```text
-result_type =
-KNOWLEDGE
-FACT
-COMPUTATION
-```
+来源链为 finding → execution_id → context_id → supporting Child → document_id/version/chunk_id。
+模型不提供可信 observation_id、状态、执行摘要或案件结论字段；系统固定历史知识解释边界。
+SUCCEEDED 仅表示解释流程与机械校验完成，不代表事实语义已人工确认，更不代表根因 SUPPORTED。
+零知识时不调用模型，模型失败/超时/引用非法时明确 INCONCLUSIVE，并丢弃全部模型发现与建议。
+引用可核验不等于自然语言蕴含已被证明，解释语义质量需独立评测。
+详见 [Stage 7C Structured Observation](runbooks/structured-observation.md)。
 
 当前 V0 已实现的最小 `InvestigationState` 为：
 
@@ -504,6 +507,7 @@ InvestigationState
 ├── planning_input
 ├── investigation_plan?
 ├── task_execution_results?
+├── observation?
 ├── round_complete?
 └── investigation_status? = OPEN
 ```
@@ -513,7 +517,7 @@ State；Graph 节点阶段不重复保存为 State 字段。
 
 `round_complete` 只表示当前图轮次结束，不表示案件调查完成或所有任务成功。
 Initial Planning 会重置该标记和本轮执行结果；7B 顺序执行知识任务并更新任务状态，
-Observation 与 Replanning 仍为 placeholder，尚未产生观察解释或后续计划。
+Observation 已实现结构化解释与机械引用校验；Replanning 仍为 placeholder，尚未产生后续计划。
 本次图调用进入 END 后案件仍 OPEN，没有新增案件关闭、恢复或多轮执行能力。
 
 # 9. Replanning

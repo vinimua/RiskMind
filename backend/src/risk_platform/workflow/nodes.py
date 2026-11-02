@@ -1,4 +1,4 @@
-"""首轮知识执行节点；Observation 与 Replanning 仍未实现。"""
+"""首轮知识执行与结构化 Observation；真实 Replanning 尚未实现。"""
 
 import asyncio
 from collections.abc import Callable
@@ -15,6 +15,10 @@ from risk_platform.execution.contracts import (
 from risk_platform.execution.knowledge import execute_knowledge_search
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.state import InvestigationState
+from risk_platform.workflow.observation import (
+    complete_observation, inconclusive_observation, summarize_executions,
+    validate_round_inputs,
+)
 
 
 def initial_planning(
@@ -27,7 +31,7 @@ def initial_planning(
     plan = investigation_agent.initial_plan(state["planning_input"])
 
     # 新轮次清除旧的结束标记，案件保持开放。
-    return {"investigation_plan": plan, "task_execution_results": [],
+    return {"investigation_plan": plan, "task_execution_results": [], "observation": None,
             "round_complete": False, "investigation_status": "OPEN"}
 
 
@@ -107,10 +111,33 @@ async def task_execution(
             "task_execution_results": results}
 
 
-def observation(_: InvestigationState) -> dict[str, object]:
-    """Run the V0 observation placeholder."""
-
-    return {}
+async def observation(
+    state: InvestigationState, *, investigation_agent: InvestigationAgent,
+    execution_context: KnowledgeExecutionContext,
+) -> dict[str, object]:
+    """先校验执行事实，再解释并验证来源。没有知识或解释失败时明确不确定。"""
+    plan, results = validate_round_inputs(state["investigation_plan"], state["task_execution_results"])
+    summaries, _ = summarize_executions(results)
+    if not any(item.outcome == "KNOWLEDGE_AVAILABLE" for item in summaries):
+        return {"observation": inconclusive_observation(
+            results, "NO_KNOWLEDGE_AVAILABLE", "本轮没有可用于解释的知识，未调用解释模型",
+        )}
+    try:
+        async with asyncio.timeout(execution_context.timeout_seconds):
+            draft = await asyncio.to_thread(
+                investigation_agent.observe_knowledge_round, plan.model_copy(deep=True),
+                [result.model_copy(deep=True) for result in results],
+            )
+        output = complete_observation(results, draft)
+    except (TimeoutError, APITimeoutError):
+        output = inconclusive_observation(results, "OBSERVATION_TIMEOUT", "本轮知识解释超时")
+    except (ValidationError, ValueError):
+        output = inconclusive_observation(results, "OBSERVATION_INVALID", "本轮知识解释结构或来源引用不合法")
+    except (APIConnectionError, APIStatusError):
+        output = inconclusive_observation(results, "OBSERVATION_DEPENDENCY_FAILURE", "知识解释服务未能完成请求")
+    except Exception:
+        output = inconclusive_observation(results, "OBSERVATION_FAILED", "本轮知识解释未能完成")
+    return {"observation": output}
 
 
 def replanning(_: InvestigationState) -> dict[str, object]:

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from risk_platform.agents.prompts import (
     INITIAL_PLANNING_SYSTEM_PROMPT,
     KNOWLEDGE_QUERY_SYSTEM_PROMPT,
+    KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT,
     build_initial_planning_context,
 )
 from risk_platform.workflow.contracts import (
@@ -36,6 +37,21 @@ class InvestigationAgent:
     def __init__(self, client: OpenAI, model: str):
         self.client = client
         self.model = model
+
+    def observe_knowledge_round(self, plan, results):
+        """只解释本轮真实结果；系统会再次校验所有引用，不赋予当前根因结论资格。"""
+        from risk_platform.workflow.observation import KnowledgeObservationDraft, build_observation_input
+
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT},
+                      {"role": "user", "content": json.dumps(build_observation_input(plan, results), ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+        )
+        choice = response.choices[0]
+        if choice.finish_reason != "stop" or not choice.message.content:
+            raise ValueError("本轮解释未完整返回")
+        return KnowledgeObservationDraft.model_validate_json(choice.message.content)
 
     def formulate_knowledge_query(
         self, task: InvestigationTask, planning_input: InitialPlanningInput,

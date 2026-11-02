@@ -110,7 +110,8 @@ def test_full_graph_success_remains_open_and_resets_old_results(monkeypatch):
                                       "round_complete": True, "task_execution_results": []}))
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"
     assert len(result["task_execution_results"]) == 2
-    assert "observation" not in result and "hypotheses" not in result
+    assert result["observation"].status == "INCONCLUSIVE" and "hypotheses" not in result
+    assert result["observation"].error.code == "NO_KNOWLEDGE_AVAILABLE"
     assert all(t.status == "COMPLETED" for t in result["investigation_plan"].tasks)
 
 

@@ -40,7 +40,8 @@ def build_investigation_graph(
         execution_context=execution_context, authorize=authorize,
         session_factory=session_factory, embedding_client=embedding_client, milvus_client=milvus_client,
     ))
-    graph.add_node("observation", observation)
+    graph.add_node("observation", partial(observation, investigation_agent=investigation_agent,
+                                          execution_context=execution_context))
     graph.add_node("replanning", replanning)
 
     graph.add_edge(START, "initial_planning")

@@ -3,7 +3,8 @@
 ## 职责
 
 只做 Query Formulation、顺序调用 Stage 7A、任务与执行结果关联并写回 LangGraph State。
-不实现 Observation、Hypothesis、Evidence、真实 Replanning、并行 DAG、自动重试、持久化或通用 Registry。
+7B 本身不实现 Observation、Hypothesis、Evidence、真实 Replanning、并行 DAG、自动重试、持久化或通用 Registry。
+随后独立的 [7C Structured Observation](structured-observation.md) 已接入解释节点，7B 执行边界保持不变。
 
 ```text
 InitialPlanningInput
