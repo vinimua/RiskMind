@@ -473,7 +473,7 @@ def _split_prose(
     body_size = chunk_size - overlap  # 主体与 overlap 共用同一个最终长度上限。
     ranges = _recursive_ranges(annotated.text, 0, len(annotated.text), body_size, 0)  # 从首选分隔符开始切出主体区间。
     pieces: list[_Piece] = []  # 收集已经拼好 overlap 的正文片段。
-    for index, current in enumerate(ranges):  # 按主体在原文中的顺序处理。
+    for index, current in enumerate(ranges):  
         source_ranges = [current]  # 至少需要追溯当前主体的来源页。
         content_parts = []  # 按输出顺序暂存 overlap 和主体文本。
         if index > 0 and overlap:  # 第一片没有前文；预算为 0 时也不补重叠。

@@ -776,6 +776,18 @@ Full-text / Exact Lookup
 
 暂不将 GraphRAG / Neo4j 作为前置依赖。
 
+## 13.3 文档管理与版本发布（待实施设计）
+
+文档新增/修改保存不可变版本；默认删除为逻辑撤回，历史来源不原地清除。
+“已存档”“选中用于后续构建”“各 profile 实际 serving”必须分别表达。
+当前 rebuild 仍读取 profile 全部持久化 Child，尚未实现只选择生效文档版本、
+自动替代旧版或文档撤回上线，不能把版本共存描述为已具备完整 CRUD 生命周期。
+
+后续用版本化来源 Manifest 统一 rebuild、计数、摘要、验收与激活，并以目录 revision
+防止旧候选覆盖新选择；不在已验收集合中直接删除或替换片段。
+详见 [文档增删改查与生命周期设计](knowledge-document-lifecycle-design.md)。
+该文档是待 review 的实施方案，不表示已新增管理 API、数据库迁移或即时撤权机制。
+
 # 14. LangGraph 状态与核心数据对象
 
 ## 14.1 推荐状态
