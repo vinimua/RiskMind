@@ -1,10 +1,13 @@
-"""Investigation Agent for the first investigation-planning round."""
+"""单一 Investigation Agent：初始规划与知识查询构造，不直接执行工具。"""
+
+import json
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
 from risk_platform.agents.prompts import (
     INITIAL_PLANNING_SYSTEM_PROMPT,
+    KNOWLEDGE_QUERY_SYSTEM_PROMPT,
     build_initial_planning_context,
 )
 from risk_platform.workflow.contracts import (
@@ -33,6 +36,31 @@ class InvestigationAgent:
     def __init__(self, client: OpenAI, model: str):
         self.client = client
         self.model = model
+
+    def formulate_knowledge_query(
+        self, task: InvestigationTask, planning_input: InitialPlanningInput,
+        *, goal: str, max_top_k: int,
+    ):
+        """将任务意图转换为候选请求；可信身份、策略与物理集合不交给模型决定。"""
+        from risk_platform.execution.contracts import KnowledgeSearchToolRequest
+
+        if task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
+            raise ValueError("Query Formulation 只支持知识检索任务")
+        payload = {
+            "investigation_context": json.loads(build_initial_planning_context(planning_input)),
+            "goal": goal, "objective": task.objective,
+            "expected_result": task.expected_result, "max_top_k": max_top_k,
+        }
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": KNOWLEDGE_QUERY_SYSTEM_PROMPT},
+                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+            response_format={"type": "json_object"},
+        )
+        choice = response.choices[0]
+        if choice.finish_reason != "stop" or not choice.message.content:
+            raise ValueError("查询构造未完整返回")
+        return KnowledgeSearchToolRequest.model_validate_json(choice.message.content)
 
     def initial_plan(
         self,

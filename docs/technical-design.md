@@ -394,17 +394,22 @@ compare_score_distribution()
 
 Investigation Agent 不直接访问底层系统。
 
-当前 LangGraph 中的 `task_execution` 仍是 V0 placeholder，尚未接入真实任务执行。
-Stage 7A 已独立提供 Execution Contracts + Knowledge Tool Adapter：校验候选知识请求、
+Stage 7A 提供 Execution Contracts + Knowledge Tool Adapter：校验候选知识请求、
 施加可信范围、检查权限、调用已有 Retrieval/Context Resolution，并返回结构化执行事实。
-它尚未接入 Graph，不建立通用 Capability Router/Tool Registry，也不持久化执行记录。
+Stage 7B 已将首轮知识任务顺序接入 LangGraph：Investigation Agent 明确执行 Query
+Formulation，将 objective 转成 candidate request 后交给 7A，不直接把目标当作 query。
+每个 task_id 对应一条 TaskExecutionResult，写入 State；零命中成功仍映射任务 COMPLETED，
+FAILED/REJECTED 映射任务 FAILED，具体原因保留在结构化结果中。
+可信 context/authorize 由构图调用方注入，不放入模型可写 State；图使用 ainvoke。
+尚未实现 Observation 解释、真实 Replanning、通用 Capability Router/Tool Registry 或持久化。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
-后续按小步推进：7B 接入顺序任务执行；7C 实现带执行引用的结构化 Observation；
+后续按小步推进：7C 实现带执行引用的结构化 Observation；
 Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B 前的语义修复已移除
 `investigation_complete`：本轮骨架退出使用 `round_complete=True`，案件保持
-`investigation_status=OPEN`。这不代表 placeholder 已执行真实知识任务。
-详见 [Stage 7A 执行边界](runbooks/knowledge-execution.md)。
+`investigation_status=OPEN`。7B 的轮次结束也不表示每个任务成功或案件调查完成。
+详见 [Stage 7A 执行边界](runbooks/knowledge-execution.md) 与
+[Stage 7B 首轮执行](runbooks/first-round-knowledge-execution.md)。
 
 Task Execution 通过 Tool Registry 执行。
 
@@ -498,6 +503,7 @@ COMPUTATION
 InvestigationState
 ├── planning_input
 ├── investigation_plan?
+├── task_execution_results?
 ├── round_complete?
 └── investigation_status? = OPEN
 ```
@@ -506,7 +512,8 @@ InvestigationState
 State；Graph 节点阶段不重复保存为 State 字段。
 
 `round_complete` 只表示当前图轮次结束，不表示案件调查完成或所有任务成功。
-Initial Planning 会重置该标记；V0 的执行与观察节点仍为 placeholder，任务仍为 PENDING。
+Initial Planning 会重置该标记和本轮执行结果；7B 顺序执行知识任务并更新任务状态，
+Observation 与 Replanning 仍为 placeholder，尚未产生观察解释或后续计划。
 本次图调用进入 END 后案件仍 OPEN，没有新增案件关闭、恢复或多轮执行能力。
 
 # 9. Replanning
