@@ -394,8 +394,16 @@ compare_score_distribution()
 
 Investigation Agent 不直接访问底层系统。
 
-当前代码中的 `task_execution` 仍是 V0 placeholder，尚未实现 Capability Router、Tool
-Registry 或任何真实工具调用。以下内容是下一阶段的目标边界，而不是已实现功能。
+当前 LangGraph 中的 `task_execution` 仍是 V0 placeholder，尚未接入真实任务执行。
+Stage 7A 已独立提供 Execution Contracts + Knowledge Tool Adapter：校验候选知识请求、
+施加可信范围、检查权限、调用已有 Retrieval/Context Resolution，并返回结构化执行事实。
+它尚未接入 Graph，不建立通用 Capability Router/Tool Registry，也不持久化执行记录。
+以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
+
+后续按小步推进：7B 接入顺序任务执行；7C 实现带执行引用的结构化 Observation；
+Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B/7C 接入前必须移除 V0 将
+首轮结束视为 `investigation_complete=True` 的临时语义，区分轮次完成与案件仍 OPEN。
+详见 [Stage 7A 执行边界](runbooks/knowledge-execution.md)。
 
 Task Execution 通过 Tool Registry 执行。
 

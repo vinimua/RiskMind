@@ -112,5 +112,5 @@ def test_baseline_propagates_chunking_failure(document: KnowledgeDocument) -> No
         "pages": (DocumentPage(content="```text\n" + "x" * 401 + "\n```"),),
     })
 
-    with pytest.raises(ValueError, match="fenced code block exceeds chunk_size"):
+    with pytest.raises(ValueError, match="围栏代码块长度超过片段长度上限 chunk_size"):
         BaselineIndexBuildStrategy().build(document)

@@ -182,7 +182,7 @@ def test_table_with_one_oversized_row_fails_fast() -> None:
         "# 报告\n\n| 指标 | 说明 |\n|---|---|\n| KS | " + "很长" * 40 + " |"
     )
 
-    with pytest.raises(ValueError, match="table header plus one row"):
+    with pytest.raises(ValueError, match="表格表头加一行数据"):
         _chunk_v1(document, chunk_size=80, overlap=10)
 
 
@@ -218,7 +218,7 @@ def test_code_fence_is_atomic_and_heading_inside_is_not_a_section() -> None:
 def test_oversized_code_fence_fails_fast() -> None:
     code = "```text\n" + "x" * 80 + "\n```"
 
-    with pytest.raises(ValueError, match="fenced code block"):
+    with pytest.raises(ValueError, match="围栏代码块"):
         _chunk_v1(_document(f"# 模型架构\n\n{code}"), chunk_size=40, overlap=10)
 
 
@@ -243,7 +243,7 @@ def test_pdf_page_range_and_stable_source_are_preserved() -> None:
 
 
 def test_local_file_path_is_not_a_stable_source_uri() -> None:
-    with pytest.raises(ValidationError, match="stable non-file URI"):
+    with pytest.raises(ValidationError, match="稳定的来源 URI"):
         _document("# 标题\n\n正文。", source_uri=r"C:\\Downloads\\report.pdf")
 
 

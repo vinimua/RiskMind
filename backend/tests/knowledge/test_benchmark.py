@@ -93,7 +93,8 @@ def test_versioned_gold_is_valid_and_buildable_without_algorithm_changes():
         BenchmarkDataset.model_validate({**dataset.model_dump(), "unexpected": True})
 
 
-def test_paired_runner_calls_sealed_pipeline_and_rejects_source_changes(sessions):
+@pytest.mark.parametrize("generation_status", [None, "SUCCEEDED", "INCONCLUSIVE"])
+def test_paired_runner_calls_sealed_pipeline_and_rejects_source_changes(sessions, generation_status):
     async def exercise():
         client = ProfileMilvus()
         for profile in IndexProfile:
@@ -101,7 +102,8 @@ def test_paired_runner_calls_sealed_pipeline_and_rejects_source_changes(sessions
             await activate(sessions, client, receipt, key=profile.value)
         dataset = BenchmarkDataset(dataset_id="smoke", annotation_notes="fixed vector plumbing only",
             documents=(document(),), questions=(BenchmarkQuestion(question_id="q",
-                request=KnowledgeSearchRequest(query="Text", top_k=1), relevant_quotes=(
+                request=KnowledgeSearchRequest(query="Text", top_k=1),
+                reference_answer="Text." if generation_status else None, relevant_quotes=(
                     GoldQuote(quote_id="text", document_id="REPORT-1", document_version="v1", text="Text."),)),))
         original_search = client.search
         def search(*args, **kwargs):
@@ -109,9 +111,18 @@ def test_paired_runner_calls_sealed_pipeline_and_rejects_source_changes(sessions
             configure_search(client, remote_rows(client, collection))
             return original_search(*args, **kwargs)
         client.search = search
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        evaluator = SimpleNamespace(evaluate=AsyncMock(return_value={"status": generation_status})) if generation_status else None
         report = await benchmark.run_benchmark(dataset, repeats=2, session_factory=sessions,
-                                               milvus_client=client, embedding_client=QueryEmbedding())
-        assert report["status"] == "SUCCEEDED"
+                                               milvus_client=client, embedding_client=QueryEmbedding(),
+                                               generation_evaluator=evaluator)
+        assert report["status"] == ("INCONCLUSIVE" if generation_status == "INCONCLUSIVE" else "SUCCEEDED")
+        assert report["retrieval_status"] == "SUCCEEDED"
+        assert report["generation_status"] == (generation_status or "NOT_RUN")
+        if evaluator:
+            assert evaluator.evaluate.await_count == 4
+            assert all(call.args[1].snapshot.index_profile in IndexProfile for call in evaluator.evaluate.call_args_list)
         assert [row["profile"] for row in report["rows"]] == [
             "baseline-v1", "parent-child-v1", "parent-child-v1", "baseline-v1"]
         assert all(row["metrics"]["context_relevant_quote_recall"] == 1 for row in report["rows"])
@@ -119,6 +130,14 @@ def test_paired_runner_calls_sealed_pipeline_and_rejects_source_changes(sessions
         with pytest.raises(ValueError, match="canonical source"):
             await benchmark.run_benchmark(invalid, session_factory=sessions)
     asyncio.run(exercise())
+
+
+def test_generation_reference_is_required_before_any_pipeline_work():
+    from unittest.mock import AsyncMock
+    dataset = BenchmarkDataset(dataset_id="unit", annotation_notes="unit", documents=(document("cause recovery"),),
+                               questions=(question(),))
+    with pytest.raises(ValueError, match="参考答案"):
+        asyncio.run(benchmark.run_benchmark(dataset, generation_evaluator=AsyncMock(), session_factory=object()))
 
 
 @pytest.mark.parametrize("fault", ["route", "dependency"])

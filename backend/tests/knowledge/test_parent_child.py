@@ -130,7 +130,7 @@ def test_oversized_parent_atomic_blocks_fail(kind):
 
 
 def test_child_atomic_code_limit_fails_without_silent_truncation():
-    with pytest.raises(ValueError, match="fenced code block exceeds chunk_size"):
+    with pytest.raises(ValueError, match="围栏代码块长度超过片段长度上限 chunk_size"):
         build("# Title\n```text\n" + "x" * 401 + "\n```")
 
 
@@ -222,5 +222,5 @@ def test_empty_searchable_document_and_unclosed_fence():
     assert build("# Title").model_dump() == {
         "search_chunks": (), "context_units": (), "context_links": (),
     }
-    with pytest.raises(ValueError, match="unclosed fenced"):
+    with pytest.raises(ValueError, match="未闭合的代码围栏"):
         build("# Title\n```text\nUnclosed")

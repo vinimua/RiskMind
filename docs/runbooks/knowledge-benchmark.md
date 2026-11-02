@@ -3,6 +3,9 @@
 本工具仅比较已封板的 Baseline Dense + Child Context 与 Parent-Child Dense
 Child + Parent Context。不添加 BM25、Reranker、Query Rewrite，不改 serving schema。
 
+现已补充召回排序指标和可选 LLM 生成侧评审，定义与运行方式见
+[RAG 召回侧与生成侧评测](knowledge-evaluation.md)。默认不启用生成侧，原有 Context 指标继续保留。
+
 ## 语料和标注
 
 `backend/tests/fixtures/knowledge_benchmark_v1.json` 固定两份仓库 synthetic report
@@ -76,13 +79,21 @@ context_tokens 为 null，不能用字符数冒充 token。token 数仅计算各
 样本保留；少量请求的 p95 仅供观察。固定 top_k 比较不是固定 token budget 比较。
 应 review 每个问题的缺失 quote 和噪声，而不是仅看总平均数。
 
-真实依赖、来源校验或任何请求失败，整次运行退出码 2，输出 INCONCLUSIVE，
+检索依赖、来源校验或检索请求失败，整次运行退出码 2，输出 INCONCLUSIVE，
 不发布部分结果或虚构 A/B 优势。报告只保留异常类型，不包含可能带凭据的依赖异常消息。
 输出包含完整 synthetic 文本；替换为真实语料前需遵循数据访问和报告保管要求。
 
 ## 当前结论与保留风险
 
-当前环境未配置 SILICONFLOW_API_KEY，故本轮真实效果评测为 INCONCLUSIVE。
+2026-11-02 已在独立 PostgreSQL/Milvus 环境使用真实 BAAI/bge-m3 完成 36 次检索，
+结果为 SUCCEEDED，生成侧为 NOT_RUN。详见
+[本轮结果分析](../knowledge-benchmark-real-20261102.md) 和
+[原始报告](../knowledge-benchmark-real-20261102.json)。Parent-Child 最终引用召回宏平均
+由 43.06% 增至 54.17%，平均上下文字符数由 863.17 增至 1259；小规模 synthetic
+语料和非穷尽标注不足以证明生产收益，根因与成熟度问题仍存在明显引用缺口。
+
+首次运行时，评测进程未获得 SILICONFLOW_API_KEY，历史报告为 INCONCLUSIVE；
+这不代表 Embedding 接入代码不存在，也不代表用户其他进程没有配置。
 确定性 tests 中固定向量只验证执行与评分链路，不是语义性能实验。
 需要真实 embedding、独立已激活 serving collections 和固定 tokenizer 后才能回答
 Parent-Child 提升多少、token 和延迟成本多少。

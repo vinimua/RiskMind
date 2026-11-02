@@ -183,7 +183,7 @@ def test_missing_parent_fails_without_partial_contexts(sessions, monkeypatch):
                 return Empty()
             return await execute(self, statement, parameters)
         monkeypatch.setattr(AsyncFacade, "execute", missing)
-        with pytest.raises(ContextResolutionIntegrityError, match="parent is missing"):
+        with pytest.raises(ContextResolutionIntegrityError, match="缺少映射指向的父块"):
             await resolve_knowledge_contexts(original, session_factory=sessions)
     asyncio.run(exercise())
 
@@ -201,7 +201,7 @@ def test_parent_page_span_contains_children(sessions, corrupt):
             async with sessions() as session:
                 async with session.begin():
                     await session.execute(update(KnowledgeContextRow).values(page_start=8, page_end=9))
-            with pytest.raises(ContextResolutionIntegrityError, match="page span"):
+            with pytest.raises(ContextResolutionIntegrityError, match="页码"):
                 await resolve_knowledge_contexts(original, session_factory=sessions)
         else:
             result = await resolve_knowledge_contexts(original, session_factory=sessions)
