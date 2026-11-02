@@ -401,8 +401,9 @@ Stage 7A 已独立提供 Execution Contracts + Knowledge Tool Adapter：校验�
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
 后续按小步推进：7B 接入顺序任务执行；7C 实现带执行引用的结构化 Observation；
-Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B/7C 接入前必须移除 V0 将
-首轮结束视为 `investigation_complete=True` 的临时语义，区分轮次完成与案件仍 OPEN。
+Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B 前的语义修复已移除
+`investigation_complete`：本轮骨架退出使用 `round_complete=True`，案件保持
+`investigation_status=OPEN`。这不代表 placeholder 已执行真实知识任务。
 详见 [Stage 7A 执行边界](runbooks/knowledge-execution.md)。
 
 Task Execution 通过 Tool Registry 执行。
@@ -497,11 +498,16 @@ COMPUTATION
 InvestigationState
 ├── planning_input
 ├── investigation_plan?
-└── investigation_complete?
+├── round_complete?
+└── investigation_status? = OPEN
 ```
 
 后续实现 Task Execution、Observation 和 Replanning 时，再依据已经确认的跨节点数据扩展
 State；Graph 节点阶段不重复保存为 State 字段。
+
+`round_complete` 只表示当前图轮次结束，不表示案件调查完成或所有任务成功。
+Initial Planning 会重置该标记；V0 的执行与观察节点仍为 placeholder，任务仍为 PENDING。
+本次图调用进入 END 后案件仍 OPEN，没有新增案件关闭、恢复或多轮执行能力。
 
 # 9. Replanning
 

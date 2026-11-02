@@ -41,4 +41,4 @@ def test_initial_planning_delegates_to_investigation_agent() -> None:
     )
 
     assert agent.received_inputs == [planning_input]
-    assert result == {"investigation_plan": plan}
+    assert result == {"investigation_plan": plan, "round_complete": False, "investigation_status": "OPEN"}

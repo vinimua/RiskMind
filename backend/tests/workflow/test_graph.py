@@ -5,7 +5,8 @@ from risk_platform.workflow.contracts import (
     InvestigationTask,
     UserQuery,
 )
-from risk_platform.workflow.graph import build_investigation_graph
+from risk_platform.workflow.graph import _route_after_replanning, build_investigation_graph
+from risk_platform.workflow.nodes import initial_planning, replanning
 
 
 class FakeInvestigationAgent:
@@ -42,7 +43,7 @@ def test_investigation_graph_compiles() -> None:
     assert graph is not None
 
 
-def test_investigation_graph_runs_to_v0_completion() -> None:
+def test_round_ends_but_investigation_remains_open() -> None:
     planning_input = _planning_input()
     plan = _plan()
     graph = build_investigation_graph(FakeInvestigationAgent(plan))
@@ -52,5 +53,22 @@ def test_investigation_graph_runs_to_v0_completion() -> None:
     assert result == {
         "planning_input": planning_input,
         "investigation_plan": plan,
-        "investigation_complete": True,
+        "round_complete": True,
+        "investigation_status": "OPEN",
     }
+    assert all(task.status == "PENDING" for task in result["investigation_plan"].tasks)
+    assert "investigation_complete" not in result
+
+
+def test_new_round_resets_previous_round_end_flag() -> None:
+    state = {"planning_input": _planning_input(), "round_complete": True, "investigation_status": "OPEN"}
+    update = initial_planning(state, investigation_agent=FakeInvestigationAgent(_plan()))
+    assert update["round_complete"] is False
+    assert update["investigation_status"] == "OPEN"
+
+
+def test_routing_uses_round_end_not_case_completion() -> None:
+    assert _route_after_replanning({"round_complete": True, "investigation_status": "OPEN"}) == "round_complete"
+    assert _route_after_replanning({"round_complete": False, "investigation_status": "OPEN"}) == "continue"
+    assert _route_after_replanning({"investigation_complete": True}) == "continue"
+    assert replanning({}) == {"round_complete": True, "investigation_status": "OPEN"}

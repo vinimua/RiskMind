@@ -80,7 +80,8 @@ scope 为空表示该层没有附加限制，不代表自动完成租户鉴权�
 - 本层不自动重试；SDK 可能有自己的重试行为，Embedding 可能重复计费。
 - asyncio.timeout 覆盖检索与解析，不能撤销已发出的上游请求，也不能强制终止同步 Milvus 线程。它不是硬实时终止保障。
 - 不更新 InvestigationTask.status，不修改 Graph State。
-- investigation_complete 的 V0 临时语义留待 7B 进入之前修正，本次不接 Graph。
+- 7A 本身不接 Graph。随后独立的 7B 前置语义修复已移除 investigation_complete：
+  骨架本轮结束仅标记 round_complete=True，investigation_status 保持 OPEN；不表示真实任务已执行。
 - 不实现任何 Observation 数据模型；7C 必须验证 execution_refs 属于当前 round 的真实执行结果。
 - Query Formulation 质量与 Observation 模型/提示版本追踪是后续评估项。
 

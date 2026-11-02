@@ -522,7 +522,7 @@ def _recursive_ranges(
         return [  # 最后退化为固定字符长度切分，跳过全空白子区间。
             trimmed_range  # 保存去除边缘空白后的有效区间。
             for offset in range(start, end, chunk_size)  # 每次前进一个主体长度。
-            if (trimmed_range := _trim_range(text, offset, min(offset + chunk_size, end)))  # 海象运算符保存本次区间。
+            if (trimmed_range := _trim_range(text, offset, min(offset + chunk_size, end)))  
             is not None  # 只保留包含实际内容的结果。
         ]
 

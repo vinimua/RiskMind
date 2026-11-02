@@ -15,9 +15,10 @@ from risk_platform.workflow.state import InvestigationState
 
 def _route_after_replanning(
     state: InvestigationState,
-) -> Literal["continue", "complete"]:
+) -> Literal["continue", "round_complete"]:
 
-    return "complete" if state.get("investigation_complete", False) else "continue"
+    # END 只是结束本次图调用，不代表关闭案件。
+    return "round_complete" if state.get("round_complete", False) else "continue"
 
 
 def build_investigation_graph(investigation_agent: InvestigationAgent):
@@ -40,7 +41,7 @@ def build_investigation_graph(investigation_agent: InvestigationAgent):
         _route_after_replanning,
         {
             "continue": "task_execution",
-            "complete": END,
+            "round_complete": END,
         },
     )
 
