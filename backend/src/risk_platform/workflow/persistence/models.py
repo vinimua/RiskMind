@@ -69,11 +69,12 @@ class OperationRow(PayloadRow, Base):
     plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
     task_id: Mapped[str | None] = mapped_column(String(128))
     operation_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(128))  # 旧 v1 缺失时不伪造回填。
     __table_args__ = (
         ForeignKeyConstraint(["plan_id", "investigation_id", "round_id"],
                              ["investigation_plans.plan_id", "investigation_plans.investigation_id", "investigation_plans.round_id"]),
         ForeignKeyConstraint(["plan_id", "task_id"], ["investigation_plan_tasks.plan_id", "investigation_plan_tasks.task_id"]),
-        CheckConstraint("schema_version = 1", name="ck_ledger_operation_schema"),
+        CheckConstraint("schema_version IN (1,2) AND (schema_version = 1 OR created_by IS NOT NULL)", name="ck_ledger_operation_schema"),
         CheckConstraint("(operation_type = 'OBSERVATION' AND task_id IS NULL) OR "
                         "(operation_type IN ('QUERY_FORMULATION', 'KNOWLEDGE_EXECUTION') AND task_id IS NOT NULL)",
                         name="ck_ledger_operation_type"),
@@ -93,6 +94,9 @@ class AttemptRow(Base):
     result_id: Mapped[str | None] = mapped_column(String(128))
     # 只保存受控代码，不保存 provider body 或原始异常正文。
     resolution_code: Mapped[str | None] = mapped_column(String(128))
+    actor_id: Mapped[str | None] = mapped_column(String(128))
+    runtime_payload: Mapped[str | None] = mapped_column(Text)
+    runtime_digest: Mapped[str | None] = mapped_column(String(64))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     __table_args__ = (
@@ -103,6 +107,8 @@ class AttemptRow(Base):
         ForeignKeyConstraint(["result_id", "attempt_id"], ["investigation_results.result_id", "investigation_results.attempt_id"],
                              name="fk_ledger_attempt_result", use_alter=True, deferrable=True, initially="DEFERRED"),
         CheckConstraint("attempt_number > 0 AND status IN ('STARTED','COMMITTED','FAILED','UNCERTAIN')", name="ck_ledger_attempt_status"),
+        CheckConstraint("(actor_id IS NULL AND runtime_payload IS NULL AND runtime_digest IS NULL) OR "
+                        "(actor_id IS NOT NULL AND runtime_payload IS NOT NULL AND runtime_digest IS NOT NULL)", name="ck_ledger_attempt_actor"),
         CheckConstraint("(status = 'STARTED' AND ended_at IS NULL AND result_id IS NULL AND resolution_code IS NULL) OR "
                         "(status = 'COMMITTED' AND ended_at IS NOT NULL AND ended_at >= started_at AND result_id IS NOT NULL AND resolution_code IS NULL) OR "
                         "(status IN ('FAILED','UNCERTAIN') AND ended_at IS NOT NULL AND ended_at >= started_at AND result_id IS NULL AND resolution_code IS NOT NULL)",

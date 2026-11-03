@@ -19,10 +19,18 @@ from risk_platform.workflow.persistence.contracts import (
 from risk_platform.workflow.persistence.models import AcceptedPlanRow, AttemptRow, OperationRow, ResultRow
 from risk_platform.workflow.persistence.repository import (
     LedgerConflictError, LedgerIntegrityError, accept_plan, commit_result, inspect_operation,
-    register_investigation, register_operation, register_round, settle_attempt, start_attempt,
+    register_investigation, register_operation, register_round, settle_attempt, start_attempt as ledger_start_attempt,
 )
 from test_ledger_contracts import accepted_plan, investigation, operation
 from test_observation import draft, execution
+from risk_platform.workflow.persistence.business_inputs import AttemptAttribution
+
+
+async def start_attempt(session, key, attempt_id, **kwargs):
+    """8B 新写入显式携带真实测试调用方；旧 0004 记录不通过此 helper 回填。"""
+    return await ledger_start_attempt(session, key, attempt_id, attribution=AttemptAttribution(
+        investigation_id="I", round_id="R", actor_id="test-actor", execution_context={
+            "actor_id": "test-actor", "index_profile": "parent-child-v1"}), **kwargs)
 
 
 pytestmark = pytest.mark.skipif(os.environ.get("RUN_POSTGRES_INTEGRATION") != "1",
@@ -272,7 +280,7 @@ def test_query_artifact_and_populated_downgrade_guard(database):
         async with sessions() as session:
             assert (await inspect_operation(session, value))[0][1].query_request == operation().candidate_request
     run(database, scenario)
-    with pytest.raises(DBAPIError, match="cannot discard execution ledger history"):
+    with pytest.raises(DBAPIError, match="cannot discard .* history"):
         command.downgrade(config(), "20261025_0003")
 
 

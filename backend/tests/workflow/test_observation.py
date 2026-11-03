@@ -18,6 +18,7 @@ from risk_platform.knowledge.serving_contracts import KnowledgeContext, Retrieva
 from risk_platform.workflow import nodes
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, InvestigationTask, TaskStatus, UserQuery
 from risk_platform.workflow.graph import build_investigation_graph
+from test_runtime import make_runtime
 from risk_platform.workflow.observation import (
     KnowledgeObservationDraft, ObservationIntegrityError, validate_round_inputs,
 )
@@ -194,9 +195,10 @@ def test_graph_observation_does_not_close_case_or_change_execution_results(monke
             if bad_model:
                 raise ValueError("private")
             return KnowledgeObservationDraft.model_validate(draft(results))
-    graph = build_investigation_graph(Agent(), execution_context=KnowledgeExecutionContext(
-        actor_id="a", index_profile=IndexProfile.PARENT_CHILD), authorize=lambda *_: True)
-    output = asyncio.run(graph.ainvoke({"planning_input": state["planning_input"]}))
+    graph = build_investigation_graph(Agent())
+    output = asyncio.run(graph.ainvoke({"planning_input": state["planning_input"]}, context=make_runtime(
+        state["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD),
+        allow_unscoped=True)))
     assert output["round_complete"] is True and output["investigation_status"] == "OPEN"
     assert output["task_execution_results"] == results
     assert output["observation"].status == ("INCONCLUSIVE" if bad_model else "SUCCEEDED")

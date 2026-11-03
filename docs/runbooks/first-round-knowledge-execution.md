@@ -37,17 +37,16 @@ round_complete=True，investigation_status=OPEN
 ```python
 graph = build_investigation_graph(
     investigation_agent,
-    execution_context=trusted_context,
-    authorize=trusted_authorizer,
     # 可注入 session_factory、embedding_client、milvus_client
 )
-result = await graph.ainvoke({"planning_input": planning_input})
+result = await graph.ainvoke({"planning_input": planning_input}, context=runtime_context)
 ```
 
-构图必须显式提供 execution_context 与 authorize；不设置默认放行身份，不从 State 读取模型声明的权限。
-调用方负责认证操作者、施加案件 scope；7B 不提供认证 API。profile 不由模型候选决定。
+8B 已将原构图绑定身份改成每次调用提供 runtime_context，不设置默认身份，不从 State 读取模型声明的权限。
+调用方负责认证操作者并从 canonical 调查记录建立 context；完整示例见[8B 运行上下文](investigation-runtime.md)。
+profile 不由模型候选决定；读历史不代表可以继续执行。
 
-异步工具节点使用 ainvoke，不再使用旧 skeleton 的同步 invoke。同步 Initial Planning 节点由图调度；
+异步工具节点使用 ainvoke，不再使用旧 skeleton 的同步 invoke。Initial Planning 在鉴权后调用原同步 Agent；
 执行节点中的同步 Query Formulation SDK 放入 asyncio.to_thread，避免阻塞事件循环。
 
 ## State 与任务状态

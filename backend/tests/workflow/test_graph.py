@@ -11,6 +11,7 @@ from risk_platform.workflow.contracts import (
 )
 from risk_platform.workflow.graph import _route_after_replanning, build_investigation_graph
 from risk_platform.workflow.nodes import initial_planning, replanning
+from test_runtime import make_runtime
 
 
 class FakeInvestigationAgent:
@@ -25,8 +26,7 @@ class FakeInvestigationAgent:
 
 
 def _graph(agent):
-    return build_investigation_graph(agent, execution_context=KnowledgeExecutionContext(
-        actor_id="operator", index_profile=IndexProfile.BASELINE), authorize=lambda *_: False)
+    return build_investigation_graph(agent)
 
 
 def _plan() -> InvestigationPlan:
@@ -60,7 +60,8 @@ def test_round_ends_but_investigation_remains_open() -> None:
     plan = _plan()
     graph = _graph(FakeInvestigationAgent(plan))
 
-    result = asyncio.run(graph.ainvoke({"planning_input": planning_input}))
+    result = asyncio.run(graph.ainvoke({"planning_input": planning_input}, context=make_runtime(
+        planning_input, actor="operator", authorize_knowledge=lambda *_: False)))
 
     assert result["planning_input"] == planning_input
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"

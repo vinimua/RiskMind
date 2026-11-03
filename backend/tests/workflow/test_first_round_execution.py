@@ -14,6 +14,7 @@ from risk_platform.knowledge.serving_contracts import RetrievalRouteSnapshot
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, InvestigationTask, UserQuery
 from risk_platform.workflow.graph import build_investigation_graph
 from risk_platform.workflow.nodes import task_execution
+from test_runtime import make_runtime
 
 
 def state(count=2):
@@ -105,9 +106,10 @@ def test_candidate_cannot_supply_system_identity():
 def test_full_graph_success_remains_open_and_resets_old_results(monkeypatch):
     original, events = state(), []
     empty_dependencies(monkeypatch, events)
-    graph = build_investigation_graph(Agent(original, events), execution_context=context(), authorize=lambda *_: True)
+    graph = build_investigation_graph(Agent(original, events))
     result = asyncio.run(graph.ainvoke({"planning_input": original["planning_input"],
-                                      "round_complete": True, "task_execution_results": []}))
+                                      "round_complete": True, "task_execution_results": []},
+                                      context=make_runtime(original["planning_input"], context())))
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"
     assert len(result["task_execution_results"]) == 2
     assert result["observation"].status == "INCONCLUSIVE" and "hypotheses" not in result

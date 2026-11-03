@@ -15,6 +15,7 @@ from .contracts import (
     OperationType, RoundRecord, canonical_json, input_digest, operation_key,
 )
 from .models import AcceptedPlanRow, AttemptRow, InvestigationRow, OperationRow, PlanTaskRow, ResultRow, RoundRow
+from .business_inputs import AttemptAttribution, BusinessOperationInput, business_projection
 
 
 class LedgerConflictError(ValueError):
@@ -40,6 +41,12 @@ def _read(row, contract):
     if row.schema_version != value.schema_version or row.input_digest != input_digest(value):
         raise LedgerIntegrityError("账本载荷版本或摘要不一致")
     return value
+
+
+def read_operation(row) -> OperationInput | BusinessOperationInput:
+    if row.schema_version not in (1, 2):
+        raise LedgerIntegrityError("未知操作契约版本")
+    return _read(row, OperationInput if row.schema_version == 1 else BusinessOperationInput)
 
 
 async def _insert(session, row_type, identity, value, **columns):
@@ -77,7 +84,8 @@ async def accept_plan(session: AsyncSession, value: AcceptedPlan) -> AcceptedPla
     return row
 
 
-async def register_operation(session: AsyncSession, value: OperationInput) -> OperationRow:
+async def register_operation(session: AsyncSession, value: OperationInput | BusinessOperationInput,
+                             *, created_by: str | None = None) -> OperationRow:
     value = _fresh(value)
     plan = await session.get(AcceptedPlanRow, value.plan_id)
     if plan is None or (plan.investigation_id, plan.round_id) != (value.investigation_id, value.round_id):
@@ -90,23 +98,40 @@ async def register_operation(session: AsyncSession, value: OperationInput) -> Op
     if value.operation_type == OperationType.OBSERVATION:
         await _observation_results(session, value)
     key = operation_key(value)
+    if isinstance(value, BusinessOperationInput):
+        TypeAdapter(Identity).validate_python(created_by)
+        # 同 key 已有 v1 时保持原文和摘要，显式验证稳定业务输入，不伪装成 v2。
+        await _lock(session, f"record:{OperationRow.__tablename__}:{key}")
+        existing = await session.get(OperationRow, key)
+        if existing is not None:
+            if business_projection(read_operation(existing)) != value:
+                raise LedgerConflictError("同一操作的稳定业务输入冲突")
+            return existing
     return (await _insert(session, OperationRow, key, value, operation_key=key,
                           investigation_id=value.investigation_id, round_id=value.round_id,
-                          plan_id=value.plan_id, task_id=value.task_id, operation_type=value.operation_type.value))[0]
+                          plan_id=value.plan_id, task_id=value.task_id, operation_type=value.operation_type.value,
+                          created_by=created_by))[0]
 
 
-async def start_attempt(session: AsyncSession, key: str, attempt_id: str, *, retry: bool = False) -> AttemptRow:
+async def start_attempt(session: AsyncSession, key: str, attempt_id: str, *, retry: bool = False,
+                        attribution: AttemptAttribution) -> AttemptRow:
     """必须在外部调用前提交本事务。retry=True 只是显式登记，不执行重试。"""
     TypeAdapter(Identity).validate_python(attempt_id)
+    attribution = _fresh(attribution)
     await _lock(session, f"operation:{key}")
-    if await session.get(OperationRow, key) is None:
+    operation_row = await session.get(OperationRow, key)
+    if operation_row is None:
         raise LedgerIntegrityError("逻辑操作尚未登记")
+    if (attribution.investigation_id, attribution.round_id) != (operation_row.investigation_id, operation_row.round_id):
+        raise LedgerIntegrityError("尝试审计身份与操作归属不一致")
     # 全局 attempt 身份也必须串行化，避免同一 ID 被两个不同 operation 争抢。
     await _lock(session, f"attempt:{attempt_id}")
     existing = await session.get(AttemptRow, attempt_id, populate_existing=True)
     if existing is not None:
         if existing.operation_key != key:
             raise LedgerConflictError("尝试身份已经属于其他操作")
+        if existing.runtime_payload != canonical_json(attribution):
+            raise LedgerConflictError("重复尝试不能替换发起人或运行上下文；旧记录缺失归因不能补写")
         return existing
     attempts = list((await session.scalars(select(AttemptRow).where(AttemptRow.operation_key == key)
                                            .order_by(AttemptRow.attempt_number)
@@ -116,7 +141,8 @@ async def start_attempt(session: AsyncSession, key: str, attempt_id: str, *, ret
     if attempts and not retry:
         raise LedgerConflictError("已有尝试历史，再次尝试必须显式声明 retry")
     row = AttemptRow(attempt_id=attempt_id, operation_key=key, attempt_number=len(attempts) + 1,
-                     status=AttemptStatus.STARTED.value)
+                     status=AttemptStatus.STARTED.value, actor_id=attribution.actor_id,
+                     runtime_payload=canonical_json(attribution), runtime_digest=input_digest(attribution))
     session.add(row)
     await session.flush()
     return row
@@ -175,10 +201,13 @@ async def _validate_artifact(session, operation, artifact):
         if result is None or result.task_id != operation.task_id or result.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
             raise LedgerIntegrityError("执行结果与正式任务身份或能力不一致")
         if result.payload is not None:
-            if result.payload.retrieved.snapshot.index_profile != operation.context.index_profile:
+            if isinstance(operation, OperationInput):
+                scope, profile, limit = operation.context.scope, operation.context.index_profile, operation.context.max_top_k
+            else:
+                scope, profile, limit = operation.scope, operation.index_profile, operation.candidate_request.top_k
+            if result.payload.retrieved.snapshot.index_profile != profile:
                 raise LedgerIntegrityError("执行结果的 profile 与可信输入不一致")
             candidate, effective = operation.candidate_request, result.payload.request
-            scope = operation.context.scope
             expected = candidate.filters.model_dump(mode="json")
             for field, allowed in scope.model_dump(mode="json").items():
                 if allowed is None:
@@ -196,7 +225,7 @@ async def _validate_artifact(session, operation, artifact):
                 if supplied is None:
                     expected[field] = allowed
             if (candidate.query != effective.query or candidate.top_k != effective.top_k
-                    or effective.top_k > operation.context.max_top_k or effective.filters.model_dump(mode="json") != expected):
+                    or effective.top_k > limit or effective.filters.model_dump(mode="json") != expected):
                 raise LedgerIntegrityError("实际执行请求与候选请求及可信范围不一致")
     else:
         observation = artifact.observation
@@ -229,7 +258,7 @@ async def commit_result(session: AsyncSession, attempt_id: str, result_id: str, 
         return row
     if attempt.status != AttemptStatus.STARTED:
         raise LedgerConflictError("已结算尝试不能再提交产物")
-    operation = _read(await session.get(OperationRow, attempt.operation_key), OperationInput)
+    operation = read_operation(await session.get(OperationRow, attempt.operation_key))
     await _validate_artifact(session, operation, artifact)
     row = ResultRow(result_id=result_id, attempt_id=attempt_id, operation_key=attempt.operation_key,
                     execution_id=artifact.execution.execution_id if artifact.execution else None,
@@ -242,14 +271,16 @@ async def commit_result(session: AsyncSession, attempt_id: str, result_id: str, 
     return row
 
 
-async def inspect_operation(session: AsyncSession, value: OperationInput) -> tuple[tuple[AttemptRow, CommittedArtifact | None], ...] | None:
+async def inspect_operation(session: AsyncSession, value: OperationInput | BusinessOperationInput) -> tuple[tuple[AttemptRow, CommittedArtifact | None], ...] | None:
     """None=未登记，空 tuple=已登记未尝试；返回全部历史，不替调用方挑选重试结果。"""
     value = _fresh(value)
     key = operation_key(value)
     row = await session.get(OperationRow, key)
     if row is None:
         return None
-    if _read(row, OperationInput) != value:
+    stored = read_operation(row)
+    matches = business_projection(stored) == value if isinstance(value, BusinessOperationInput) else stored == value
+    if not matches:
         raise LedgerConflictError("同一逻辑操作的输入摘要冲突")
     history = []
     for attempt in await session.scalars(select(AttemptRow).where(AttemptRow.operation_key == key)

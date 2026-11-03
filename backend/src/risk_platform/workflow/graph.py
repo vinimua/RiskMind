@@ -1,11 +1,10 @@
-from functools import partial
-from collections.abc import Callable
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 
 from risk_platform.agents.investigation import InvestigationAgent
-from risk_platform.execution.contracts import KnowledgeExecutionContext
+from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime, knowledge_authorizer
 from risk_platform.workflow.nodes import (
     initial_planning,
     observation,
@@ -24,24 +23,31 @@ def _route_after_replanning(
 
 
 def build_investigation_graph(
-    investigation_agent: InvestigationAgent, *, execution_context: KnowledgeExecutionContext,
-    authorize: Callable[[str, str, KnowledgeExecutionContext], bool],
+    investigation_agent: InvestigationAgent, *,
     session_factory=None, embedding_client=None, milvus_client=None,
 ):
-    """由可信应用注入执行身份、范围与鉴权策略，使用 ainvoke 执行异步知识节点。"""
+    """共享图仅绑定服务依赖；每次 ainvoke 必须提供独立可信 context。"""
 
-    graph = StateGraph(InvestigationState)
-    graph.add_node(
-        "initial_planning",
-        partial(initial_planning, investigation_agent=investigation_agent),
-    )
-    graph.add_node("task_execution", partial(
-        task_execution, investigation_agent=investigation_agent,
-        execution_context=execution_context, authorize=authorize,
-        session_factory=session_factory, embedding_client=embedding_client, milvus_client=milvus_client,
-    ))
-    graph.add_node("observation", partial(observation, investigation_agent=investigation_agent,
-                                          execution_context=execution_context))
+    async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationRuntimeContext]):
+        check_runtime(runtime.context, InvestigationAction.CONTINUE, state["planning_input"])
+        return initial_planning({**state, "planning_input": state["planning_input"].model_copy(deep=True)},
+                                investigation_agent=investigation_agent)
+
+    async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationRuntimeContext]):
+        trusted = check_runtime(runtime.context, InvestigationAction.CONTINUE, state["planning_input"])
+        return await task_execution(state, investigation_agent=investigation_agent, execution_context=trusted,
+                                    authorize=knowledge_authorizer(runtime.context), session_factory=session_factory,
+                                    embedding_client=embedding_client, milvus_client=milvus_client,
+                                    before_task=lambda: check_runtime(runtime.context, InvestigationAction.CONTINUE, state["planning_input"]))
+
+    async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationRuntimeContext]):
+        trusted = check_runtime(runtime.context, InvestigationAction.CONTINUE, state["planning_input"])
+        return await observation(state, investigation_agent=investigation_agent, execution_context=trusted)
+
+    graph = StateGraph(InvestigationState, context_schema=InvestigationRuntimeContext)
+    graph.add_node("initial_planning", plan_node)
+    graph.add_node("task_execution", execute_node)
+    graph.add_node("observation", observe_node)
     graph.add_node("replanning", replanning)
 
     graph.add_edge(START, "initial_planning")

@@ -400,11 +400,11 @@ Stage 7B 已将首轮知识任务顺序接入 LangGraph：Investigation Agent �
 Formulation，将 objective 转成 candidate request 后交给 7A，不直接把目标当作 query。
 每个 task_id 对应一条 TaskExecutionResult，写入 State；零命中成功仍映射任务 COMPLETED，
 FAILED/REJECTED 映射任务 FAILED，具体原因保留在结构化结果中。
-可信 context/authorize 由构图调用方注入，不放入模型可写 State；图使用 ainvoke。
+可信 context/authorize 由可信应用按次通过 ainvoke(context=...) 注入，不放入模型可写 State 或永久绑定在图上。
 Stage 7C 已接入结构化 Observation 与确定性执行/来源引用校验。
 Stage 8A 已实现独立的 PostgreSQL 调查执行账本：稳定身份、canonical digest、不可变计划/结果与尝试历史。
-8A 已 review SEALED，P1=0。下一步 8B 先明确 per-run 身份/授权、调查 scope 绑定与尝试级 actor 审计；
-Operation v1 与 Runtime Context 耦合记录为 P2-9，契约演进不能重写旧摘要或历史。
+8A 已 review SEALED，P1=0。8B 已实现 per-run 身份/读与继续分权、canonical 调查 scope 绑定及尝试级 actor 审计，待 review。
+Operation v1 与 Runtime Context 的耦合通过 v2 业务输入及显式兼容投影处理，原摘要与历史不改写。
 账本尚未接入图节点；尚未实现真实 Replanning、通用 Capability Router/Tool Registry 或工作流持久化恢复。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
@@ -415,6 +415,7 @@ Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B 前的语义修�
 详见 [Stage 7A 执行边界](runbooks/knowledge-execution.md) 与
 [Stage 7B 首轮执行](runbooks/first-round-knowledge-execution.md)。
 Stage 8A 的 schema、事务与验收见[调查执行账本](runbooks/investigation-ledger.md)。
+Stage 8B 的调用、权限和兼容边界见[每次运行的可信上下文](runbooks/investigation-runtime.md)。
 
 Task Execution 通过 Tool Registry 执行。
 

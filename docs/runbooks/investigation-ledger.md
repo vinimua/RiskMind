@@ -150,7 +150,7 @@ inspect_operation(session, expected_input) 返回：
 读取时重新验证类型与摘要，返回原 execution_id、observation_id 和快照。
 存在多个已提交尝试时返回全部历史，不隐式挑选“最新成功结果”。
 仓储复用能力是为后续恢复提供依据，不代表当前 graph 已会自动复用。
-8A 是可信应用内部仓储，不是已鉴权的公共读取接口；后续 8B 必须按当前权限检查读取与继续执行。
+8A 是可信应用内部仓储，不是已鉴权的公共读取接口；8B 已提供按当前权限检查的[受控访问层](investigation-runtime.md)。
 
 Observation 登记/提交校验其引用属于本计划的已提交执行结果，按正式任务顺序一一对应。
 提交时还核对系统摘要与 7C finding 的执行/context/source/quote 引用。
@@ -183,3 +183,7 @@ P2-9：v1 OperationInput 保存完整 KnowledgeExecutionContext，actor_id/timeo
 当前行为 fail-closed，不重开 8A。8B 需区分不可变业务输入与每次调用的当前身份/授权/预算，
 并记录每个新 Attempt 的真实发起人。旧 Attempt 不能从 Operation 的 actor 推断成已经证明的实际执行人。
 具体边界见 [Stage 8B 设计](../workflow-persistence-resume-design.md#18-stage-8b-可信运行上下文与授权边界)。
+
+8B 实现补充：原 v1 契约和 0004 未改写，0005 新增 v2 Operation 创作者和 Attempt 发起人审计。
+新调用 start_attempt 必须显式提供 AttemptAttribution，数据库也拒绝缺失审计的新 Attempt。
+应用应使用 workflow.access 的受控入口，不用原始仓储函数绕过资源鉴权；旧测试数据缺失归因仍保持未知。

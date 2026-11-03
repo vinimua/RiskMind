@@ -40,6 +40,7 @@ async def task_execution(
     execution_context: KnowledgeExecutionContext,
     authorize: Callable[[str, str, KnowledgeExecutionContext], bool],
     session_factory=None, embedding_client=None, milvus_client=None,
+    before_task: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """按计划顺序构造 query 并调用 7A；普通任务失败不阻止后续独立任务。
 
@@ -56,6 +57,8 @@ async def task_execution(
     results = []
     tasks = []
     for task in plan.tasks:
+        if before_task is not None:
+            before_task()  # 8B 按任务重新检查当前案件继续权限，失败不进入 Query Formulation。
         started = datetime.now(timezone.utc)
         try:
             if task.capability == CapabilityType.KNOWLEDGE_RETRIEVAL:
