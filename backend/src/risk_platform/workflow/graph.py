@@ -7,7 +7,6 @@ from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow.contracts import InitialPlanningInput
 from risk_platform.workflow.runtime import InvestigationAction, check_runtime, knowledge_authorizer
 from risk_platform.workflow.nodes import (
-    initial_planning,
     observation,
     replanning,
     task_execution,
@@ -26,35 +25,28 @@ def _route_after_replanning(
 
 def build_investigation_graph(
     investigation_agent: InvestigationAgent, *,
-    session_factory=None, embedding_client=None, milvus_client=None, checkpointer=None,
+    session_factory, checkpointer, embedding_client=None, milvus_client=None,
 ):
-    """共享图仅绑定服务依赖；每次 ainvoke 必须提供独立可信 context。"""
+    """持久化 runner 内部使用的唯一拓扑，不提供无账本执行入口。"""
+    if session_factory is None or checkpointer is None:
+        raise ValueError("正式执行必须配置账本会话与检查点存储")
 
     def invocation(runtime):
         # 声明类型与实际调用一致，不再兼容裸 InvestigationRuntimeContext。
         return require_invocation(runtime.context, claimed=True)
 
     def wire_update(update, call):
-        if call.recovery is None:
-            return update
         from risk_platform.workflow.recovery import _wire
         return _wire(update)
 
     def phase_executor(call):
-        if call.recovery is None:
-            return None  # 兼容 7B/8B 非持久化入口，不自动接受计划或创建账本身份。
         from risk_platform.workflow.recovery import ledger_phase_executor
         return ledger_phase_executor(session_factory, call.recovery)
 
     async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
-        if call.recovery is not None:
-            from risk_platform.workflow.recovery import load_accepted_plan
-            return await load_accepted_plan(state, call.recovery, sessions=session_factory)
-        source = InitialPlanningInput.model_validate(state["planning_input"])
-        check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
-        return initial_planning({**state, "planning_input": source.model_copy(deep=True)},
-                                investigation_agent=investigation_agent)
+        from risk_platform.workflow.recovery import prepare_plan
+        return await prepare_plan(state, call.recovery, sessions=session_factory, agent=investigation_agent)
 
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)

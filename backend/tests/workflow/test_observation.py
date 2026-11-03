@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from workflow_test_helpers import run_phase, run_business_nodes
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution.contracts import (
     ExecutionError, KnowledgeExecutionContext, KnowledgeExecutionPayload, KnowledgeSearchToolRequest, TaskExecutionResult,
@@ -18,7 +19,6 @@ from risk_platform.knowledge.retrieval import DenseChildRetrievalResult, Retriev
 from risk_platform.knowledge.serving_contracts import KnowledgeContext, RetrievalRouteSnapshot
 from risk_platform.workflow import nodes
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, InvestigationTask, TaskStatus, UserQuery
-from risk_platform.workflow.graph import build_investigation_graph
 from test_runtime import make_runtime
 from risk_platform.workflow.observation import (
     KnowledgeObservationDraft, ObservationIntegrityError, validate_round_inputs,
@@ -76,7 +76,7 @@ def run(results, data=None, failure=None):
                 raise failure
             return KnowledgeObservationDraft.model_validate(data if data is not None else draft(results))
     return asyncio.run(nodes.observation(current(results), investigation_agent=Agent(), execution_context=KnowledgeExecutionContext(
-        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD)))['observation']
+        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD), execute_phase=run_phase))['observation']
 
 
 def test_mixed_results_keep_failure_facts_and_traceable_historical_finding():
@@ -174,12 +174,12 @@ def test_actual_deadline_without_partial_output():
             time.sleep(.04)
             return KnowledgeObservationDraft.model_validate(draft(results))
     ctx = KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD, timeout_seconds=.001)
-    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), execution_context=ctx))
+    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), execution_context=ctx, execute_phase=run_phase))
     assert result["observation"].error.code == "OBSERVATION_TIMEOUT"
 
 
 @pytest.mark.parametrize("bad_model", [False, True])
-def test_graph_observation_does_not_close_case_or_change_execution_results(monkeypatch, bad_model):
+def test_business_observation_does_not_close_case_or_change_execution_results(monkeypatch, bad_model):
     results = [execution()]
     state = current(results)
     pending = state["investigation_plan"].model_copy(deep=True)
@@ -196,10 +196,9 @@ def test_graph_observation_does_not_close_case_or_change_execution_results(monke
             if bad_model:
                 raise ValueError("private")
             return KnowledgeObservationDraft.model_validate(draft(results))
-    graph = build_investigation_graph(Agent())
-    output = asyncio.run(graph.ainvoke({"planning_input": state["planning_input"]}, context=InvestigationInvocation(runtime=make_runtime(
+    output = asyncio.run(run_business_nodes(Agent(), state["planning_input"], make_runtime(
         state["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD),
-        allow_unscoped=True))))
+        allow_unscoped=True)))
     assert output["round_complete"] is True and output["investigation_status"] == "OPEN"
     assert output["task_execution_results"] == results
     assert output["observation"].status == ("INCONCLUSIVE" if bad_model else "SUCCEEDED")
@@ -234,7 +233,7 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
             data = draft(supplied)
             return KnowledgeObservationDraft.model_validate(data)
     output = asyncio.run(nodes.observation(current(results), investigation_agent=MutatingAgent(),
-        execution_context=KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD)))
+        execution_context=KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD), execute_phase=run_phase))
     assert output["observation"].error.code == "OBSERVATION_INVALID"
     assert results[0].payload.resolved.contexts[0].content == original_text
     assert results[0].payload.retrieved.hits[0].hit.source.document_version == "v1"

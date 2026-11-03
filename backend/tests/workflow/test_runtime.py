@@ -3,6 +3,7 @@
 import asyncio
 
 import pytest
+from workflow_test_helpers import run_business_nodes
 
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution.contracts import KnowledgeExecutionContext
@@ -10,7 +11,6 @@ from risk_platform.knowledge.context_resolution import ContextResolutionResult
 from risk_platform.knowledge.retrieval import DenseChildRetrievalResult
 from risk_platform.knowledge.serving_contracts import RetrievalRouteSnapshot
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, InvestigationTask, UserQuery
-from risk_platform.workflow.graph import build_investigation_graph
 from risk_platform.workflow.persistence.contracts import InvestigationRecord, RoundRecord
 from risk_platform.workflow.runtime import InvestigationAccessError, InvestigationAction, InvestigationRuntimeContext, check_runtime
 
@@ -63,7 +63,7 @@ def test_unscoped_case_requires_explicit_application_choice():
 
 
 @pytest.mark.parametrize("concurrent", [False, True])
-def test_one_compiled_graph_handles_two_actors_without_identity_or_scope_leak(monkeypatch, concurrent):
+def test_business_nodes_handle_two_actors_without_identity_or_scope_leak(monkeypatch, concurrent):
     from risk_platform.execution import knowledge
     observed = []
     class Agent:
@@ -82,14 +82,14 @@ def test_one_compiled_graph_handles_two_actors_without_identity_or_scope_leak(mo
         return ContextResolutionResult(snapshot=result.snapshot, contexts=())
     monkeypatch.setattr(knowledge, "retrieve_dense_children", retrieve)
     monkeypatch.setattr(knowledge, "resolve_knowledge_contexts", resolve)
-    graph = build_investigation_graph(Agent())
+    agent = Agent()
     def auth(actor, action, execution):
         observed.append((actor, execution.scope.model_id))
         return True
     async def call(actor, model):
         source = planning(model)
-        return await graph.ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=make_runtime(source, actor=actor,
-            investigation_id="I-"+actor, round_id="R-"+actor, authorize_knowledge=auth)))
+        return await run_business_nodes(agent, source, make_runtime(source, actor=actor,
+            investigation_id="I-"+actor, round_id="R-"+actor, authorize_knowledge=auth))
     async def run():
         return await asyncio.gather(call("A", "M1"), call("B", "M2")) if concurrent else [await call("A", "M1"), await call("B", "M2")]
     results = asyncio.run(run())
@@ -116,7 +116,7 @@ def test_invalid_runtime_never_calls_planning_or_query_model(bad):
     else:
         context = make_runtime(source, authorize_resource=lambda _, action, __: action == "investigation:read")
     with pytest.raises(InvestigationAccessError):
-        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=context)))
+        asyncio.run(run_business_nodes(Agent(), source, context))
 
 
 def test_revocation_after_planning_stops_before_query_formulation():
@@ -131,4 +131,4 @@ def test_revocation_after_planning_stops_before_query_formulation():
     source = planning()
     context = make_runtime(source, authorize_resource=lambda *_: permission["allowed"])
     with pytest.raises(InvestigationAccessError):
-        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=context)))
+        asyncio.run(run_business_nodes(Agent(), source, context))

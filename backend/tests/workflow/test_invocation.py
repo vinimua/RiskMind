@@ -1,6 +1,7 @@
 """8D-3：调用上下文类型唯一，入口不会自动包装或接受调用方伪造的 claim。"""
 
 import asyncio
+from langgraph.checkpoint.memory import InMemorySaver
 
 import pytest
 
@@ -26,8 +27,9 @@ def test_graph_rejects_invalid_context_before_planning(kind):
         def initial_plan(self, *_):
             pytest.fail("非法调用上下文不能进入规划模型")
     with pytest.raises(InvestigationAccessError):
-        asyncio.run(build_investigation_graph(Agent()).ainvoke(
-            {"planning_input": source}, context=values[kind]))
+        asyncio.run(build_investigation_graph(Agent(), session_factory=object(), checkpointer=InMemorySaver()).ainvoke(
+            {"planning_input": source}, config={"configurable": {"thread_id": "invalid-context"}},
+            context=values[kind]))
 
 
 @pytest.mark.parametrize("kind", ["bare", "missing", "dict", "forged-claim"])

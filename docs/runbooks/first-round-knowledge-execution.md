@@ -36,13 +36,15 @@ round_complete=True，investigation_status=OPEN
 
 ```python
 from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.recovery import FirstRoundRecovery
 
-graph = build_investigation_graph(
+runner = FirstRoundRecovery(
     investigation_agent,
-    # 可注入 session_factory、embedding_client、milvus_client
+    session_factory=sessions,
+    checkpointer=saver,
 )
-result = await graph.ainvoke({"planning_input": planning_input},
-                            context=InvestigationInvocation(runtime=runtime_context))
+# Investigation / Round 已入账；prepare_plan 在图内生成候选、校验并接受。
+result = await runner.ainvoke(context=InvestigationInvocation(runtime=runtime_context))
 ```
 
 8B 已将原构图绑定身份改成每次调用提供 runtime_context，不设置默认身份，不从 State 读取模型声明的权限。

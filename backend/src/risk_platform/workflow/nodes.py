@@ -80,11 +80,6 @@ class QueryOutcome:
     failure: TaskExecutionResult | None = None
 
 
-async def direct_phase(kind, produce, **_):
-    """兼容原非持久化入口，只执行阶段，不声称提供账本去重。"""
-    return await produce()
-
-
 def _business_model(model, value):
     # 两种入口共用节点，JSON 字典与业务对象均重新经过契约校验。
     return model.model_validate_json(value.model_dump_json()) if hasattr(value, "model_dump_json") else model.model_validate(value)
@@ -101,16 +96,18 @@ async def task_execution(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
     execution_context: KnowledgeExecutionContext,
     authorize: Callable[[str, str, KnowledgeExecutionContext], bool],
+    execute_phase,
     session_factory=None, embedding_client=None, milvus_client=None,
     before_task: Callable[[], object] | None = None,
-    execute_phase=None,
 ) -> dict[str, object]:
     """唯一任务循环；阶段执行器决定直接执行或通过账本复用、提交。
 
     持久化首次执行与恢复使用同一 ledger executor，无历史时创建新 Attempt。
-    原普通入口保留 direct_phase，不提供恢复保证；无自动重试或并发。
+    无默认直通执行器；生产由持久化图注入，单元测试显式提供阶段替身。
     """
-    phase = execute_phase or direct_phase
+    if not callable(execute_phase):
+        raise TypeError("必须显式提供阶段执行器")
+    phase = execute_phase
     plan = _business_model(InvestigationPlan, state["investigation_plan"])
     planning_input = _business_model(InitialPlanningInput, state["planning_input"])
     trusted = KnowledgeExecutionContext.model_validate_json(execution_context.model_dump_json())
@@ -160,7 +157,7 @@ async def task_execution(
 
 
 async def observation(state: InvestigationState, *, investigation_agent: InvestigationAgent,
-                      execution_context: KnowledgeExecutionContext, execute_phase=None) -> dict[str, object]:
+                      execution_context: KnowledgeExecutionContext, execute_phase) -> dict[str, object]:
     """统一 Observation 阶段入口，分离解释逻辑与持久化机制。"""
     plan = _business_model(InvestigationPlan, state["investigation_plan"])
     results = [_business_model(TaskExecutionResult, row) for row in state["task_execution_results"]]
@@ -172,7 +169,9 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
             investigation_agent=investigation_agent, execution_context=execution_context,
         )
         return update["observation"]
-    output = await (execute_phase or direct_phase)(OperationType.OBSERVATION, explain, results=results)
+    if not callable(execute_phase):
+        raise TypeError("必须显式提供阶段执行器")
+    output = await execute_phase(OperationType.OBSERVATION, explain, results=results)
     return {"observation": output}
 
 

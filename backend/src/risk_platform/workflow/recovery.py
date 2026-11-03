@@ -1,4 +1,4 @@
-"""8C 首轮恢复。节点推进交给 LangGraph；本文件只提供入账、鉴权和重入保护。"""
+"""首轮持久化执行：图内规划、正式接受、阶段入账与恢复；节点推进仍由 LangGraph 决定。"""
 
 import asyncio
 import hashlib
@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
-from risk_platform.agents.prompts import KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT, KNOWLEDGE_QUERY_SYSTEM_PROMPT
+from risk_platform.agents.prompts import INITIAL_PLANNING_SYSTEM_PROMPT, KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT, KNOWLEDGE_QUERY_SYSTEM_PROMPT
 from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, TaskExecutionResult
 from risk_platform.workflow import access, nodes
 from risk_platform.workflow.invocation import InvestigationInvocation, require_invocation
@@ -25,6 +25,9 @@ from risk_platform.workflow.persistence.business_inputs import BusinessOperation
 from risk_platform.workflow.persistence.contracts import AcceptedPlan, OperationType, canonical_json, input_digest, operation_key
 from risk_platform.workflow.persistence.models import AcceptedPlanRow, AttemptRow, ResultRow
 from risk_platform.workflow.persistence.recovery_contracts import FirstRoundSpec, PhaseArtifact, RecoveryPolicy, RunClaim
+from risk_platform.workflow.persistence.planning_contracts import PlanningSpec, PlanningCandidate
+from risk_platform.workflow.persistence.planning_models import PlanningRunRow, PlanningAcceptanceRow
+from risk_platform.workflow.persistence import planning_repository as planning
 from risk_platform.workflow.persistence.recovery_models import (
     InvestigationRunAttemptRow, InvestigationRunClaimRow, InvestigationRunRow, InvestigationRunSelectionRow,
 )
@@ -36,6 +39,10 @@ class RecoveryBlockedError(RuntimeError):
 
 class RecoveryFencedError(RecoveryBlockedError):
     """当前运行已失去独占权，不接受过期 worker 的产物。"""
+
+
+class PlanningPreparationError(RuntimeError):
+    """初始候选无法可靠产生或未通过确定性校验，未执行知识任务。"""
 
 
 def _wire(value):
@@ -61,7 +68,7 @@ class _ClaimGuard:
     run_id: str
     generation: int
 
-    async def check(self, session):
+    async def check_lock(self):
         if self.connection.closed or self.connection.invalidated:
             raise RecoveryFencedError("运行锁连接已失效")
         try:
@@ -71,6 +78,9 @@ class _ClaimGuard:
             raise RecoveryFencedError("无法确认本次运行的独占权") from None
         if row[0] != self.backend_pid or not row[1]:
             raise RecoveryFencedError("本次运行已失去数据库会话锁")
+
+    async def check(self, session):
+        await self.check_lock()
         current = await session.scalar(select(InvestigationRunRow).where(InvestigationRunRow.run_id == self.run_id)
                                         .with_for_update().execution_options(populate_existing=True))
         if current is None or current.current_generation != self.generation:
@@ -83,6 +93,8 @@ class _Invocation:
     spec: FirstRoundSpec
     policy: RecoveryPolicy
     guard: _ClaimGuard
+    planning_spec: PlanningSpec | None = None
+    planning_claim_id: str | None = None
 
 # 打开专用连接
 #     ↓
@@ -93,7 +105,7 @@ class _Invocation:
 #     ↓
 # finally：关闭持锁连接，释放锁
 @asynccontextmanager
-async def _claim(engine, sessions, spec, context, policy):
+async def _claim(engine, sessions, spec, context, policy, planning_spec=None):
     # 专用自动提交连接持会话锁；外部调用期间不持长数据库事务/行锁。
     connection = await engine.connect()
     try:
@@ -105,26 +117,41 @@ async def _claim(engine, sessions, spec, context, policy):
         async with sessions.begin() as session:
             trusted = await _authorize(session, context)
             plan_row = await session.get(AcceptedPlanRow, spec.plan_id)
-            if plan_row is None or (plan_row.investigation_id, plan_row.round_id) != (spec.investigation_id, spec.round_id):
+            if plan_row is not None and (plan_row.investigation_id, plan_row.round_id) != (spec.investigation_id, spec.round_id):
                 raise ledger.LedgerIntegrityError("恢复必须从同一调查、轮次的已接受计划开始")
-            plan = ledger._read(plan_row, AcceptedPlan)
-            if any(task.capability != "KNOWLEDGE_RETRIEVAL" for task in plan.plan.tasks):
-                raise ledger.LedgerIntegrityError("首轮恢复仅支持正式知识任务")
-            row, _ = await ledger._insert(session, InvestigationRunRow, spec.run_id, spec, run_id=spec.run_id,
-                investigation_id=spec.investigation_id, round_id=spec.round_id, plan_id=spec.plan_id)
-            generation = (row.current_generation or 0) + 1
-            claim = RunClaim(run_id=spec.run_id, generation=generation, actor_id=trusted.actor_id, policy=policy)
-            session.add(InvestigationRunClaimRow(run_id=spec.run_id, generation=generation, actor_id=trusted.actor_id,
-                schema_version=1, payload=canonical_json(claim), input_digest=input_digest(claim)))
-            row.current_generation = generation
-            await session.flush()
-        yield _Invocation(context, spec, policy, _ClaimGuard(connection, pid, spec.run_id, generation))
+            if planning_spec is not None:
+                await planning.register(session, planning_spec)
+            if plan_row is None and planning_spec is None:
+                raise ledger.LedgerIntegrityError("恢复必须从同一调查、轮次的已接受计划开始")
+            generation = 0
+            if plan_row is not None:
+                if planning_spec is not None and await session.get(PlanningAcceptanceRow, spec.run_id) is None:
+                    raise ledger.LedgerIntegrityError("规划记录缺少正式接受来源，不能跳过候选校验")
+                generation = await _bind_execution_run(session, spec, plan_row, trusted, policy)
+        yield _Invocation(context, spec, policy, _ClaimGuard(connection, pid, spec.run_id, generation),
+                          planning_spec, "planning-claim-" + uuid4().hex)
     finally:
         # 不把持会话锁的连接放回池；连接关闭即释放全部重入锁，进程死亡也由 PG 释放。
         try:
             await asyncio.shield(connection.invalidate())
         finally:
             await connection.close()
+
+
+async def _bind_execution_run(session, spec, plan_row, trusted, policy):
+    """AcceptedPlan 已存在后，原有正式 Run/Claim 才能建立；调用方负责提交。"""
+    plan = ledger._read(plan_row, AcceptedPlan)
+    if any(task.capability != "KNOWLEDGE_RETRIEVAL" for task in plan.plan.tasks):
+        raise ledger.LedgerIntegrityError("首轮恢复仅支持正式知识任务")
+    row, _ = await ledger._insert(session, InvestigationRunRow, spec.run_id, spec, run_id=spec.run_id,
+        investigation_id=spec.investigation_id, round_id=spec.round_id, plan_id=spec.plan_id)
+    generation = (row.current_generation or 0) + 1
+    claim = RunClaim(run_id=spec.run_id, generation=generation, actor_id=trusted.actor_id, policy=policy)
+    session.add(InvestigationRunClaimRow(run_id=spec.run_id, generation=generation, actor_id=trusted.actor_id,
+        schema_version=1, payload=canonical_json(claim), input_digest=input_digest(claim)))
+    row.current_generation = generation
+    await session.flush()
+    return generation
 
 
 def _operation(invocation, kind, *, task_id=None, candidate=None, results=()):
@@ -243,13 +270,86 @@ async def _phase(sessions, invocation, value, produce):
 
 
 async def load_accepted_plan(state, invocation, *, sessions):
-    """prepare_plan 在恢复模式下的实现；读取正式计划，不重新调用规划模型。"""
+    """读取正式计划；新调查的候选生成与接受由 prepare_plan 先完成。"""
     async with sessions() as session:
         await _authorize(session, invocation.context)
         row = await session.get(AcceptedPlanRow, invocation.spec.plan_id)
         plan = ledger._read(row, AcceptedPlan).plan
     return _wire(dict(investigation_plan=plan, task_execution_results=[], observation=None,
                       round_complete=False, investigation_status="OPEN"))
+
+
+async def prepare_plan(state, invocation, *, sessions, agent):
+    """图内规划；候选和正式计划分次提交，重入时不重新生成已保存的 task_id。"""
+    if invocation.guard.generation == 0:
+        attempt_id, accepted = await _planning_candidate(sessions, invocation, agent)
+        async with sessions.begin() as session:
+            trusted = await _authorize(session, invocation.context)
+            await invocation.guard.check_lock()
+            facts = await planning.history(session, invocation.spec.run_id)
+            fact = next((row for row in facts if row.attempt_id == attempt_id), None)
+            if fact is None or fact.status != "COMMITTED":
+                raise ledger.LedgerIntegrityError("正式接受必须关联可靠保存的候选计划")
+            expected = planning.candidate(fact, invocation.planning_spec, invocation.context.investigation.planning_input)
+            if expected != accepted:
+                raise ledger.LedgerIntegrityError("候选计划在接受前发生变化")
+            row = await ledger.accept_plan(session, accepted)
+            session.add(PlanningAcceptanceRow(run_id=invocation.spec.run_id, attempt_id=attempt_id,
+                plan_id=accepted.plan_id, investigation_id=accepted.investigation_id, round_id=accepted.round_id,
+                actor_id=trusted.actor_id))
+            generation = await _bind_execution_run(session, invocation.spec, row, trusted, invocation.policy)
+        invocation.guard.generation = generation
+    return await load_accepted_plan(state, invocation, sessions=sessions)
+
+
+async def _planning_candidate(sessions, invocation, agent):
+    spec, source = invocation.planning_spec, invocation.context.investigation.planning_input
+    if "KNOWLEDGE_RETRIEVAL" not in source.available_capabilities:
+        raise PlanningPreparationError("当前调查没有可用的知识检索能力，未调用规划模型")
+    # 事务 1：优先复用已提交候选，或结算已经退出的旧 claim 留下的 STARTED。
+    async with sessions.begin() as session:
+        await _authorize(session, invocation.context)
+        await invocation.guard.check_lock()
+        facts = await planning.history(session, invocation.spec.run_id)
+        for fact in facts:
+            if fact.status == "COMMITTED":
+                return fact.attempt_id, planning.candidate(fact, spec, source)
+        for fact in facts:
+            if fact.status == "STARTED":
+                if fact.claim_id == invocation.planning_claim_id:
+                    raise RecoveryBlockedError("当前规划尝试尚未结束，不能重复调用")
+                await planning.settle(session, fact.attempt_id, status="UNCERTAIN", code="PREVIOUS_PLANNING_INTERRUPTED")
+    # 事务 2：显式重试策略与调用前登记，不在等待模型期间持事务。
+    async with sessions.begin() as session:
+        trusted = await _authorize(session, invocation.context)
+        await invocation.guard.check_lock()
+        facts = await planning.history(session, invocation.spec.run_id)
+        if any(row.status == "UNCERTAIN" for row in facts) and not invocation.policy.retry_uncertain:
+            raise RecoveryBlockedError("初始规划存在不确定尝试，当前策略不允许重试")
+        if any(row.status == "FAILED" for row in facts) and not invocation.policy.retry_failed_attempts:
+            raise RecoveryBlockedError("初始规划曾失败，当前策略不允许重试")
+        attempt_id = await planning.start(session, spec, context=invocation.context, trusted=trusted,
+            claim_id=invocation.planning_claim_id, number=len(facts) + 1)
+    try:
+        async with asyncio.timeout(trusted.timeout_seconds):
+            update = await asyncio.to_thread(nodes.initial_planning,
+                {"planning_input": source.model_copy(deep=True)}, investigation_agent=agent)
+        candidate = PlanningCandidate(plan=update["investigation_plan"])
+        accepted = planning.validate(candidate, spec, source)
+    except Exception as error:
+        invalid = isinstance(error, (ValueError, ValidationError))
+        async with sessions.begin() as session:
+            await _authorize(session, invocation.context)
+            await invocation.guard.check_lock()
+            await planning.settle(session, attempt_id, status="FAILED" if invalid else "UNCERTAIN",
+                code="INITIAL_PLANNING_INVALID" if invalid else "INITIAL_PLANNING_UNCERTAIN")
+        raise PlanningPreparationError("初始规划未可靠完成或候选不合法，未接受计划、未执行知识任务") from None
+    # 事务 3：合法候选和 COMMITTED 一起保存；这里还不是正式接受。
+    async with sessions.begin() as session:
+        await _authorize(session, invocation.context)
+        await invocation.guard.check_lock()
+        await planning.settle(session, attempt_id, status="COMMITTED", value=candidate)
+    return attempt_id, accepted
 
 
 def ledger_phase_executor(sessions, invocation):
@@ -286,9 +386,9 @@ def ledger_phase_executor(sessions, invocation):
 
 
 class FirstRoundRecovery:
-    """Accepted Plan 的统一持久化调用入口，首次执行和恢复使用同一 ainvoke。
+    """首轮统一持久化入口；可以图内生成计划，也可以接续已有正式计划。
 
-    类名保留以避免无必要的改名；不要求先有 checkpoint，也不接受用户指定恢复模式。
+    类名保留以避免无必要的改名；不要求先有计划或 checkpoint，不接受用户指定恢复模式。
     不暴露任意 thread_id、State 更新或跳步恢复。
     """
 
@@ -312,14 +412,25 @@ class FirstRoundRecovery:
             raise ledger.LedgerIntegrityError("检查点版本不兼容统一拓扑，需要显式迁移后恢复")
         if type(values.get("round_complete", False)) is not bool:
             raise ledger.LedgerIntegrityError("checkpoint 轮次结束标记必须是布尔值")
+        if values.get("investigation_status", "OPEN") != "OPEN":
+            raise ledger.LedgerIntegrityError("首轮恢复不能关闭案件")
         if values.get("run_id") != spec.run_id or values.get("plan_id") != spec.plan_id:
             raise ledger.LedgerIntegrityError("checkpoint 与调查运行身份不一致")
         if InitialPlanningInput.model_validate(values["planning_input"]) != context.investigation.planning_input:
             raise ledger.LedgerIntegrityError("checkpoint 的规划来源与 canonical 调查不一致")
         async with self._sessions.begin() as session:
             await _authorize(session, context)
+            await invocation.guard.check_lock()
+            plan_row = await session.get(AcceptedPlanRow, spec.plan_id)
+            if plan_row is None:
+                if invocation.planning_spec is None or "investigation_plan" in values or values.get("task_execution_results") or values.get("observation") or values.get("round_complete"):
+                    raise ledger.LedgerIntegrityError("尚未接受计划的检查点不能宣称已有执行产物")
+                root = await session.get(PlanningRunRow, spec.run_id)
+                if root is None or ledger._read(root, PlanningSpec) != invocation.planning_spec:
+                    raise ledger.LedgerIntegrityError("计划生成前的检查点缺少稳定规划记录")
+                return
             await invocation.guard.check(session)
-            accepted = ledger._read(await session.get(AcceptedPlanRow, spec.plan_id), AcceptedPlan).plan
+            accepted = ledger._read(plan_row, AcceptedPlan).plan
             if "investigation_plan" not in values:
                 if values.get("task_execution_results") or values.get("observation") or values.get("round_complete"):
                     raise ledger.LedgerIntegrityError("checkpoint 缺正式计划却宣称已有产物")
@@ -354,21 +465,49 @@ class FirstRoundRecovery:
             if values.get("investigation_status", "OPEN") != "OPEN":
                 raise ledger.LedgerIntegrityError("首轮恢复不能关闭案件")
 
-    async def ainvoke(self, *, plan_id, context: InvestigationInvocation, policy: RecoveryPolicy | None = None):
+    async def ainvoke(self, *, context: InvestigationInvocation, plan_id=None, policy: RecoveryPolicy | None = None):
         # 对外统一包装，内部 claim 必须由本次调用鉴权和加锁后生成。
         context = require_invocation(context).runtime
         policy = RecoveryPolicy.model_validate_json((policy or RecoveryPolicy()).model_dump_json())
         async with self._sessions() as session:
             trusted = await _authorize(session, context)  # 在任何 checkpoint 读取/反序列化前。
-        identity = [context.investigation.investigation_id, context.round.round_id, plan_id]
-        run_id = "round-" + hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
-        spec = FirstRoundSpec(run_id=run_id, investigation_id=identity[0], round_id=identity[1], plan_id=plan_id,
+            case_id, round_id = context.investigation.investigation_id, context.round.round_id
+            existing_run = await session.scalar(select(InvestigationRunRow).where(InvestigationRunRow.round_id == round_id))
+            preparation = await session.scalar(select(PlanningRunRow).where(PlanningRunRow.round_id == round_id))
+            if existing_run is not None or preparation is not None:
+                owner = existing_run if existing_run is not None else preparation
+                if owner.investigation_id != case_id or (plan_id is not None and plan_id != owner.plan_id):
+                    raise ledger.LedgerConflictError("该轮次已经绑定其他正式计划或规划身份")
+                plan_id, run_id = owner.plan_id, owner.run_id
+            elif plan_id is None:
+                plans = list(await session.scalars(select(AcceptedPlanRow).where(AcceptedPlanRow.round_id == round_id)))
+                if len(plans) > 1:
+                    raise ledger.LedgerConflictError("存在多份正式计划，必须明确提供 plan_id")
+                if plans:
+                    plan_id = plans[0].plan_id
+                run_id = None
+            else:
+                run_id = None
+        creating_plan = plan_id is None
+        if creating_plan:
+            # 启动身份只依赖案件与轮次；plan_id 是内部预留身份，不要求调用方先生成计划。
+            digest = hashlib.sha256(json.dumps([case_id, round_id], separators=(",", ":")).encode()).hexdigest()
+            run_id, plan_id = "round-" + digest, "plan-" + digest
+        elif run_id is None:
+            # 保留旧 AcceptedPlan 入口的 run_id 和历史 checkpoint 定位。
+            identity = [case_id, round_id, plan_id]
+            run_id = "round-" + hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+        spec = FirstRoundSpec(run_id=run_id, investigation_id=case_id, round_id=round_id, plan_id=plan_id,
             scope=trusted.scope, index_profile=trusted.index_profile, max_top_k=trusted.max_top_k,
             query_model=self._agent.model, observation_model=self._agent.model,
             query_prompt_digest=hashlib.sha256(KNOWLEDGE_QUERY_SYSTEM_PROMPT.encode()).hexdigest(),
             observation_prompt_digest=hashlib.sha256(KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT.encode()).hexdigest())
+        planning_spec = None
+        if creating_plan or preparation is not None:
+            planning_spec = PlanningSpec(execution=spec, planning_input_digest=input_digest(context.investigation.planning_input),
+                prompt_digest=hashlib.sha256(INITIAL_PLANNING_SYSTEM_PROMPT.encode()).hexdigest())
         config = {"configurable": {"thread_id": run_id}}
-        async with _claim(self._lock_engine, self._sessions, spec, context, policy) as invocation:
+        async with _claim(self._lock_engine, self._sessions, spec, context, policy, planning_spec) as invocation:
             snapshot = await self._graph.aget_state(config)
             # 旧拓扑的待执行节点不能静默跳过或映射；保留历史并明确拒绝。
             if set(snapshot.next) - {"prepare_plan", "task_execution", "observation", "replanning"}:
@@ -383,7 +522,8 @@ class FirstRoundRecovery:
                     planning_input=context.investigation.planning_input))
                 output = await self._graph.ainvoke(initial, config, context=InvestigationInvocation(runtime=context, recovery=invocation), durability="sync")
             await self._validate(output, invocation)
-            return dict(planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
+            return dict(run_id=run_id, plan_id=plan_id,
+                planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
                 investigation_plan=InvestigationPlan.model_validate(output["investigation_plan"]),
                 task_execution_results=[TaskExecutionResult.model_validate(row) for row in output["task_execution_results"]],
                 observation=RoundObservation.model_validate(output["observation"]), round_complete=True, investigation_status="OPEN")

@@ -1,14 +1,14 @@
 # Stage 8C：首轮崩溃恢复
 
-状态：已实现，待 review。只从已接受并入账的 Plan 开始，案件保持 OPEN。
-初始规划模型调用及其接受前的失败不属于本版恢复范围。没有多轮 Replanning、自动重试、Celery 或恢复 Web API。
+状态：已实现，待 review。现已扩展到图内初始规划；案件与轮次须先入账，案件保持 OPEN。
+没有多轮 Replanning、自动重试、Celery 或恢复 Web API。已有正式计划的执行与恢复继续兼容。
 
 ## 1. 代码组成
 
 | 文件 | 职责 |
 |---|---|
-| `workflow/graph.py` | 唯一拓扑定义；按可信 Runtime 分派普通/恢复节点执行逻辑 |
-| `workflow/state.py` | 两种入口共用的业务状态与可选检查点身份 |
+| `workflow/graph.py` | 唯一持久化拓扑，prepare_plan 在图内准备或读取计划 |
+| `workflow/state.py` | 共享业务状态与检查点身份 |
 | `workflow/invocation.py` | 每次调用的可信 Runtime 包装，恢复控制信息不进入 State |
 | `workflow/recovery.py` | 受控恢复入口、ledger phase executor、逐阶段入账、运行独占和代次 fencing；不建图或重复任务循环 |
 | `workflow/checkpoints.py` | 官方 AsyncPostgresSaver 的显式创建/初始化；JSON-only 序列化 |
@@ -17,12 +17,16 @@
 | `workflow/persistence/repository.py` | 显式读取 v1/v2 产物；保存 Query 失败事实 |
 | `workflow/nodes.py` | 唯一任务循环与 Observation 业务入口；原查询形成/错误分类与 7A 路径复用 |
 | `alembic/versions/20261103_0006_first_round_recovery.py` | 增量迁移、FK/唯一性、不可变与代次约束 |
+| `workflow/persistence/planning_*` | 计划前稳定输入、尝试与候选、正式接受的来源绑定 |
+| `alembic/versions/20261104_0007_planning_journal.py` | 规划日志表、不可变/完整性与候选接受约束 |
 
 FirstRoundRecovery 是安全入口，不另建调度器。节点与推进仍全部由 LangGraph 执行：
 
 ```text
-Accepted Plan
-    ↓ prepare_plan（恢复时读取 Accepted Plan）
+prepare_plan
+    已有正式计划 → 加载并核验
+    没有正式计划 → Agent 候选 → 确定性校验 → 候选入账 → accept_plan
+    ↓
 task_execution
     每个 Task：Query phase → Execution phase
     ↓
@@ -33,9 +37,11 @@ replanning（当前仅结束本轮，案件 OPEN）→ END
 
 8D-1 统一为 graph.py 中同一份拓扑定义；FirstRoundRecovery 通过同一个 builder 编译图，
 不是强制所有调用共享同一个 compiled object。8D-2 进一步统一任务循环和 Observation，
-仅保留 direct/ledger 两个阶段执行机制；首次持久化执行和恢复均经过同一 ledger executor。
-已有 8B build_investigation_graph 继续提供非恢复首轮入口；生产调用方应明确选择入口，
-不能通过非恢复入口重新调用同一已执行轮次并声称已经获得去重保证。
+随后已删除 direct 生产路径；首次持久化执行和恢复均经过同一 ledger executor。
+正式执行入口现在只有 FirstRoundRecovery.ainvoke；原非持久化入口已移除。
+build_investigation_graph 仅供 runner 内部构图，必须配置账本与 checkpoint，并提供入口生成的有效 claim。
+prepare_plan 现在在图内生成候选并正式接受，也能直接读取已有计划；单元测试显式注入阶段替身。
+调查和轮次仍由可信调用方提前登记；初始计划不再要求在图外手工准备。详细恢复边界见[图内初始规划](../workflow-initial-planning-recovery.md)。
 
 ## 2. 调用方式
 
@@ -49,7 +55,7 @@ from risk_platform.workflow.recovery import FirstRoundRecovery
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.persistence.recovery_contracts import RecoveryPolicy
 
-# AcceptedPlan、Investigation、Round 已通过原仓储可靠提交。
+# Investigation、Round 已通过原仓储可靠提交；新调查不要求事先有 AcceptedPlan。
 # context 通过 8B load_runtime_context 从 canonical 记录加载，当前 actor 已认证。
 async with postgres_checkpointer(checkpoint_database_url, setup=False) as saver:
     runner = FirstRoundRecovery(
@@ -58,15 +64,17 @@ async with postgres_checkpointer(checkpoint_database_url, setup=False) as saver:
         checkpointer=saver,
     )
     invocation = InvestigationInvocation(runtime=context)
-    result = await runner.ainvoke(plan_id=accepted_plan_id, context=invocation)
+    result = await runner.ainvoke(context=invocation)
+    accepted_plan_id = result["plan_id"]
 ```
 
 runner 和 graph 可以复用，当前 actor/权限/预算按每次调用提供。
 Agent 必须固定 model；规范 Agent 的 query/observation prompt 文本摘要也写入 FirstRoundSpec。
-该 runner 只调用现有 Agent 的 Query Formulation 和 Observation，不重新调用 initial_plan。
+该 runner 在没有正式计划时于 prepare_plan 内调用 initial_plan；已有正式计划或已提交候选不会重新生成。
 测试使用替身，不证明自然语言语义质量。
 
-thread_id 从 investigation/round/plan 稳定身份生成，不接受外部自由传入的 thread_id、checkpoint_id、
+新规划 thread_id 从 investigation/round 生成，plan_id 内部预留；旧已接受计划沿用原 investigation/round/plan 定位。
+不接受外部自由传入的 thread_id、checkpoint_id、
 任意 State、Command 或跳步更新。不要把内部 `_graph.aget_state/aupdate_state` 暴露为公共 API。
 对外结果仍为类型化的 planning input、plan、execution results、observation 和轮次状态。
 

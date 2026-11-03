@@ -411,10 +411,15 @@ Stage 8D-1 将 topology 收敛到 graph.py：prepare_plan → task_execution →
 Stage 8D-2 将任务循环与 Observation 入口收敛到 nodes.py；可信 Runtime 注入 direct 或 ledger phase executor。
 Stage 8D-3 将图与持久化入口的调用上下文统一为 InvestigationInvocation，删除裸 Runtime 自动包装。
 FirstRoundRecovery.ainvoke 同时支持 Accepted Plan 的首次持久化执行与恢复，无 Fresh/Resume 模式开关；内部 claim 由入口生成。
-持久化首次执行与恢复共用 ledger executor；缺少 Accepted Plan 时拒绝执行。旧非持久化入口仍兼容，不自动获得账本去重。
+持久化首次执行与恢复共用 ledger executor；知识任务只能在正式接受计划后执行。
+当前正式调查入口仅保留 FirstRoundRecovery.ainvoke，非持久化 graph invocation 和 direct_phase 已删除。
+build_investigation_graph 只负责 runner 内部构图，要求数据库会话、checkpointer 与有效 claim。
+prepare_plan 在图内加载已有 AcceptedPlan，或调用 Agent 生成候选、确定性校验、持久化候选后正式接受。
+新调查调用 runner.ainvoke(context=...) 无需 plan_id；案件与轮次须先入账，规划日志按案件/轮次建立稳定身份。
+新增 0007 规划输入/尝试/接受来源表；AcceptedPlan、接受来源与正式 Run 在同一事务提交，旧账本历史不改写。
 普通/恢复模式只由每次调用的可信 Runtime 决定；共享 InvestigationState，恢复机制不再创建第二张图。
-只统一拓扑，不统一 phase 执行协议；非恢复入口仍没有账本去重保证。新恢复检查点为 v2，旧 v1 明确拒绝且需显式迁移。
-原非恢复入口不自动获得去重保证；尚未实现多轮 Replanning、通用 Capability Router/Tool Registry 或恢复 Web API。
+恢复检查点保持 v2，旧 v1 明确拒绝且需显式迁移。
+尚未实现多轮 Replanning、通用 Capability Router/Tool Registry 或恢复 Web API。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
 后续按小步推进：

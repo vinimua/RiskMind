@@ -9,6 +9,17 @@ from risk_platform.workflow.persistence.contracts import OperationType
 from test_first_round_execution import Agent, context, empty_dependencies, state
 
 
+def test_business_nodes_have_no_default_direct_executor():
+    assert not hasattr(nodes, "direct_phase")
+    current, events = state(1), []
+    with pytest.raises(TypeError, match="execute_phase"):
+        asyncio.run(nodes.task_execution(current, investigation_agent=Agent(current, events),
+            execution_context=context(), authorize=lambda *_: True))
+    with pytest.raises(TypeError, match="execute_phase"):
+        asyncio.run(nodes.observation(current, investigation_agent=object(), execution_context=context()))
+    assert events == []
+
+
 def test_shared_loop_and_observation_use_phase_executor_in_business_order(monkeypatch):
     current, events, phases = state(), [], []
     empty_dependencies(monkeypatch, events)

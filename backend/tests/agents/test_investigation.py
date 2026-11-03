@@ -25,7 +25,7 @@ class FakeCompletions:
     def create(self, **kwargs):
         self.calls.append(kwargs)
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.content))]
+            choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=self.content))]
         )
 
 
@@ -220,3 +220,12 @@ def test_initial_plan_rejects_empty_model_content() -> None:
 
     with pytest.raises(ValueError, match="没有返回任何内容"):
         agent.initial_plan(_user_planning_input())
+
+
+@pytest.mark.parametrize("reason", ["length", "content_filter", None])
+def test_initial_plan_rejects_incomplete_response_even_if_json_is_valid(reason):
+    client = FakeClient(_plan_json())
+    client.completions.create = lambda **_: SimpleNamespace(choices=[
+        SimpleNamespace(finish_reason=reason, message=SimpleNamespace(content=_plan_json()))])
+    with pytest.raises(ValueError, match="未完整返回"):
+        InvestigationAgent(client=client, model="test-model").initial_plan(_user_planning_input())

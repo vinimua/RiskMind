@@ -104,7 +104,10 @@ class InvestigationAgent:
             response_format={"type": "json_object"},
         )
 
-        content = response.choices[0].message.content
+        choice = response.choices[0]
+        if choice.finish_reason != "stop":
+            raise ValueError("初始计划未完整返回，不能接受截断或中止的草案")
+        content = choice.message.content
         if not content:
             raise ValueError("初始计划生成失败,模型没有返回任何内容")
 

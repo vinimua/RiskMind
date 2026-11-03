@@ -1,4 +1,8 @@
 import asyncio
+import pytest
+from langgraph.checkpoint.memory import InMemorySaver
+from workflow_test_helpers import run_business_nodes
+from risk_platform.workflow.runtime import InvestigationAccessError
 
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 from risk_platform.knowledge.indexing.profiles import IndexProfile
@@ -27,7 +31,7 @@ class FakeInvestigationAgent:
 
 
 def _graph(agent):
-    return build_investigation_graph(agent)
+    return build_investigation_graph(agent, session_factory=object(), checkpointer=InMemorySaver())
 
 
 def _plan() -> InvestigationPlan:
@@ -56,7 +60,15 @@ def test_investigation_graph_compiles() -> None:
     assert graph is not None
 
 
-def test_single_topology_owns_both_modes() -> None:
+@pytest.mark.parametrize("missing", ["session_factory", "checkpointer"])
+def test_graph_requires_persistence_dependencies(missing):
+    dependencies = {"session_factory": object(), "checkpointer": InMemorySaver()}
+    dependencies[missing] = None
+    with pytest.raises(ValueError, match="账本会话与检查点"):
+        build_investigation_graph(FakeInvestigationAgent(_plan()), **dependencies)
+
+
+def test_single_persistent_topology() -> None:
     graph = _graph(FakeInvestigationAgent(_plan()))
     assert set(graph.get_graph().nodes) == {
         "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
@@ -71,16 +83,16 @@ def test_single_topology_owns_both_modes() -> None:
     assert not hasattr(recovery, "RecoveryState")
 
 
-def test_trusted_wrapper_keeps_normal_execution_and_state_cannot_select_recovery() -> None:
+def test_state_cannot_enable_retired_direct_execution() -> None:
     source = _planning_input()
     graph = _graph(FakeInvestigationAgent(_plan()))
     runtime = make_runtime(source, authorize_knowledge=lambda *_: False)
-    result = asyncio.run(graph.ainvoke({
-        "planning_input": source, "mode": "RECOVERY", "run_id": "untrusted",
-        "plan_id": "untrusted", "checkpoint_schema_version": 1,
-    }, context=InvestigationInvocation(runtime=runtime)))
-    assert result["task_execution_results"][0].status == "REJECTED"
-    assert result["round_complete"] and result["investigation_status"] == "OPEN"
+    with pytest.raises(InvestigationAccessError):
+        asyncio.run(graph.ainvoke({
+            "planning_input": source, "mode": "RECOVERY", "run_id": "untrusted",
+            "plan_id": "untrusted", "checkpoint_schema_version": 2,
+        }, config={"configurable": {"thread_id": "rejected-direct"}},
+           context=InvestigationInvocation(runtime=runtime)))
 
 
 def test_round_ends_but_investigation_remains_open() -> None:
@@ -88,8 +100,8 @@ def test_round_ends_but_investigation_remains_open() -> None:
     plan = _plan()
     graph = _graph(FakeInvestigationAgent(plan))
 
-    result = asyncio.run(graph.ainvoke({"planning_input": planning_input}, context=InvestigationInvocation(runtime=make_runtime(
-        planning_input, actor="operator", authorize_knowledge=lambda *_: False))))
+    result = asyncio.run(run_business_nodes(FakeInvestigationAgent(plan), planning_input,
+        make_runtime(planning_input, actor="operator", authorize_knowledge=lambda *_: False)))
 
     assert result["planning_input"] == planning_input
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"

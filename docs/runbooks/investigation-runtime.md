@@ -23,8 +23,10 @@
 
 ```python
 from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.recovery import FirstRoundRecovery
 
-graph = build_investigation_graph(investigation_agent)  # 可以复用结构与安全共享的依赖
+# Investigation、Round 已入账；计划由图内 prepare_plan 生成并正式接受。
+runner = FirstRoundRecovery(investigation_agent, session_factory=sessions, checkpointer=saver)
 
 async with sessions() as session:
     runtime_context = await load_runtime_context(
@@ -37,15 +39,15 @@ async with sessions() as session:
         action=InvestigationAction.CONTINUE,
     )
 
-result = await graph.ainvoke(
-    {"planning_input": runtime_context.investigation.planning_input.model_copy(deep=True)},
+result = await runner.ainvoke(
     context=InvestigationInvocation(runtime=runtime_context),
 )
 ```
 
 execution 的 actor/scope/profile/预算由可信调用方提供，不从 Agent 返回值构造。
 8D-3 起图调用必须显式包装 InvestigationInvocation，不再兼容裸 Runtime 自动包装。
-这里是非持久化入口，不因上下文统一而自动获得账本去重；持久化首次执行/恢复使用 FirstRoundRecovery。
+非持久化图入口已退役；首次持久化执行和恢复统一使用上述 runner。当前权限必须同时允许 READ 和 CONTINUE。
+如需明确接续既有正式计划，可额外传 plan_id；新调查无需提前准备计划。
 authorize_resource 接收 `(actor_id, action, InvestigationResource)`；authorize_knowledge 继续使用 7A 的签名。
 两者都必须显式返回 True，不能用 1、非空对象或异常代替授权。
 

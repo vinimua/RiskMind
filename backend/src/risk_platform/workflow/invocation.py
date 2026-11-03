@@ -21,6 +21,8 @@ def require_invocation(value, *, claimed=False) -> InvestigationInvocation:
     """拒绝旧裸 Runtime 和伪造包装；不隐式选择另一种执行模式。"""
     if not isinstance(value, InvestigationInvocation) or not isinstance(value.runtime, InvestigationRuntimeContext):
         raise InvestigationAccessError("必须显式提供 InvestigationInvocation 和可信 runtime")
+    if claimed and value.recovery is None:
+        raise InvestigationAccessError("正式图只能通过持久化 runner 在取得运行权后调用")
     if value.recovery is not None:
         if not claimed:
             raise InvestigationAccessError("调用方不能预先提供内部恢复 claim")

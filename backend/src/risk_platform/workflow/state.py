@@ -11,8 +11,8 @@ from risk_platform.workflow.observation import RoundObservation
 class InvestigationState(TypedDict):
     """唯一调查图的共享业务状态。
 
-    普通执行保留类型化业务对象；恢复入口使用 JSON 字典/列表写入检查点，
-    对应执行函数重新校验为业务对象。执行模式由可信 runtime 决定，不由字段决定。
+    正式图使用 JSON 字典/列表保存检查点，业务函数重新校验为类型化对象。
+    保留对象类型以便直接测试业务函数；不存在由 State 选择的非持久化执行模式。
     """
 
     planning_input: InitialPlanningInput | dict

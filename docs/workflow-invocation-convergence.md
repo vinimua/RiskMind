@@ -2,6 +2,10 @@
 
 状态：已实现，待 review。P2-15 的声明/实际上下文类型差异已在实现中消除，关闭状态待 review 确认。
 
+后续变更：下文第 2 节是 8D-3 阶段的历史接口，现已退役。正式执行只使用第 3 节的持久化 runner；
+当前边界见 [移除非持久化入口](workflow-persistent-only-boundary.md)。
+计划生成现已纳入图内，最新调用与接受前恢复规则见 [图内初始规划](workflow-initial-planning-recovery.md)。
+
 ## 1. 唯一上下文契约
 
 图声明 `context_schema=InvestigationInvocation`，各节点使用 `Runtime[InvestigationInvocation]`。
