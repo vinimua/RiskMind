@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.execution import knowledge
 from risk_platform.execution.contracts import KnowledgeExecutionContext, KnowledgeSearchToolRequest
 from risk_platform.knowledge.contracts import KnowledgeHit, KnowledgeSourceRef
@@ -97,8 +98,9 @@ async def seed(sessions, count=2, suffix=""):
 async def context(sessions, actor="A", permission=lambda *_: True, timeout=30, suffix=""):
     async with sessions() as session:
         return await load_runtime_context(session, investigation_id="I"+suffix, round_id="R"+suffix,
-            execution=KnowledgeExecutionContext(actor_id=actor, index_profile="parent-child-v1", scope={"model_id": "M"}, timeout_seconds=timeout),
-            authorize_resource=permission, authorize_knowledge=lambda *_: True,
+            actor_id=actor, timeout_seconds=timeout,
+            tools=(KnowledgeSearchTool(KnowledgeExecutionContext(actor_id=actor, index_profile="parent-child-v1", scope={"model_id": "M"}, timeout_seconds=timeout), lambda *_: True),),
+            authorize_resource=permission,
             action=InvestigationAction.READ if actor == "reader" else InvestigationAction.CONTINUE)
 
 
@@ -523,7 +525,7 @@ def test_committed_failure_rejection_and_zero_hits_never_implicitly_rerun(databa
             await seed(sessions, 1)
             a = await context(sessions)
             if status == "REJECTED":
-                a = replace(a, authorize_knowledge=lambda *_: False)
+                a = replace(a, tools=(replace(a.tools[0], authorize=lambda *_: False),))
             first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             assert first["task_execution_results"][0].status == ("SUCCEEDED" if status == "NO_HITS" else status)
             assert first["observation"].status == "INCONCLUSIVE"

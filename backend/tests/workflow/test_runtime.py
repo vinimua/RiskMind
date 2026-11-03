@@ -6,6 +6,7 @@ import pytest
 from workflow_test_helpers import run_business_nodes
 
 from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 from risk_platform.knowledge.context_resolution import ContextResolutionResult
 from risk_platform.knowledge.retrieval import DenseChildRetrievalResult
@@ -22,8 +23,9 @@ def make_runtime(planning_input, execution=None, *, actor="actor", investigation
     return InvestigationRuntimeContext(
         investigation=InvestigationRecord(investigation_id=investigation_id, created_by="creator",
             planning_input=planning_input.model_copy(deep=True)),
-        round=RoundRecord(investigation_id=investigation_id, round_id=round_id, round_number=1), execution=execution,
-        authorize_resource=authorize_resource, authorize_knowledge=authorize_knowledge, allow_unscoped=allow_unscoped)
+        round=RoundRecord(investigation_id=investigation_id, round_id=round_id, round_number=1), actor_id=execution.actor_id, timeout_seconds=execution.timeout_seconds,
+        authorize_resource=authorize_resource,
+        tools=(KnowledgeSearchTool(execution, authorize_knowledge, allow_unscoped),))
 
 
 def planning(model="M"):

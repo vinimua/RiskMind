@@ -997,3 +997,21 @@ Validate
 - **Validation** 负责验证修复效果。
 
 这套结构是后续所有 Agent、Tool、Knowledge、Rule 和 Action 模块设计的总体基线。
+
+
+## 可信执行环境与工具绑定的职责分离
+
+`InvestigationRuntimeContext` 只保存 canonical Investigation/Round、actor_id、资源授权函数、
+运行 timeout_seconds 和不可变工具绑定元组。它不依赖 KnowledgeExecutionContext 或知识 profile。
+`check_runtime()` 核对当前案件和 READ/CONTINUE 权限；工具绑定自行验证 actor/资源归属。
+
+当前唯一生产工具绑定是 `workflow/knowledge_tool.py::KnowledgeSearchTool`，承载知识专用
+scope/index_profile/max_top_k/工具超时、独立知识授权和无模型范围显式许可。
+请求仍经过 Query Formulation → KnowledgeSearchToolRequest → 7A execute_knowledge_search；
+知识工具绑定不是模型可声明的能力。工具只能由可信应用显式安装，缺少绑定直接失败。
+不增加 Factory/动态插件加载/第二套编排器。后续工具需要独立请求、授权、执行适配和测试，
+不能仅向元组塞一个名字就获得可执行能力。
+
+首次执行与恢复继续走同一持久化 runner，历史 FirstRoundSpec、业务摘要、Attempt 归因
+和数据库 schema 不变。现有首轮 runner 仍只支持知识任务；通用 Runtime 不代表已实现其他工具。
+完整设计与接入示例见 [可信环境与知识工具](workflow-trusted-tools.md)。

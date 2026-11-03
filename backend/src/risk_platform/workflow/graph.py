@@ -5,7 +5,8 @@ from langgraph.runtime import Runtime
 
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow.contracts import InitialPlanningInput
-from risk_platform.workflow.runtime import InvestigationAction, check_runtime, knowledge_authorizer
+from risk_platform.workflow.runtime import InvestigationAction, check_runtime
+from risk_platform.workflow.knowledge_tool import knowledge_execution, knowledge_authorizer
 from risk_platform.workflow.nodes import (
     observation,
     replanning,
@@ -51,7 +52,7 @@ def build_investigation_graph(
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
-        trusted = check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        trusted = knowledge_execution(call.runtime, InvestigationAction.CONTINUE, source)
         update = await task_execution(state, investigation_agent=investigation_agent, execution_context=trusted,
                                     authorize=knowledge_authorizer(call.runtime), session_factory=session_factory,
                                     embedding_client=embedding_client, milvus_client=milvus_client,
@@ -62,7 +63,7 @@ def build_investigation_graph(
     async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
-        trusted = check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        trusted = knowledge_execution(call.runtime, InvestigationAction.CONTINUE, source)
         update = await observation(state, investigation_agent=investigation_agent, execution_context=trusted,
                                  execute_phase=phase_executor(call))
         return wire_update(update, call)

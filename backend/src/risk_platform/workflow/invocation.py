@@ -8,7 +8,12 @@ from risk_platform.workflow.runtime import InvestigationAccessError, Investigati
 if TYPE_CHECKING:
     from risk_platform.workflow.recovery import _Invocation
 
+# runtime
+# # 谁在运行？哪个案件？允许使用哪些工具？
 
+# recovery
+# # 正在执行哪次运行？是否持有执行权？
+# # 已有结果能否复用？失败后是否允许重试？
 @dataclass(frozen=True)
 class InvestigationInvocation:
     """唯一调用上下文；recovery 只能由受控持久化入口在 claim 后填入。"""

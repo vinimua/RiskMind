@@ -5,6 +5,7 @@ from alembic import command
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
+from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 from risk_platform.workflow.access import (
     load_runtime_context, read_operation_history, register_authorized_operation, start_authorized_attempt,
@@ -33,7 +34,12 @@ async def runtime(session, actor="A", permission="both", **changes):
         authorize_knowledge=lambda *_: True,
         action=InvestigationAction.READ if permission == "investigation:read" else InvestigationAction.CONTINUE)
     options.update(changes)
-    return await load_runtime_context(session, **options)
+    execution = options.pop("execution")
+    allow_unscoped = options.pop("allow_unscoped")
+    authorize = options.pop("authorize_knowledge")
+    return await load_runtime_context(session, actor_id=execution.actor_id,
+        timeout_seconds=execution.timeout_seconds,
+        tools=(KnowledgeSearchTool(execution, authorize, allow_unscoped),), **options)
 
 
 @pytest.mark.parametrize("kind", list(OperationType))

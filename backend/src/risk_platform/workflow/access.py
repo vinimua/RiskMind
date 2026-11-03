@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from risk_platform.execution.contracts import KnowledgeExecutionContext
+from risk_platform.workflow.knowledge_tool import knowledge_execution
 from risk_platform.knowledge.contracts import KnowledgeFilters
 from risk_platform.workflow.runtime import (
     InvestigationAccessError, InvestigationAction, InvestigationRuntimeContext, check_runtime,
@@ -37,9 +37,9 @@ class AttemptReceipt:
     actor_id: str | None
 
 
-async def load_runtime_context(session, *, investigation_id, round_id, execution,
-                               authorize_resource, authorize_knowledge, action: InvestigationAction,
-                               allow_unscoped=False) -> InvestigationRuntimeContext:
+async def load_runtime_context(session, *, investigation_id, round_id, actor_id, tools=(),
+                               authorize_resource, action: InvestigationAction,
+                               timeout_seconds=30.0) -> InvestigationRuntimeContext:
     investigation = await session.get(InvestigationRow, investigation_id)
     round_record = await session.get(RoundRow, round_id)
     if investigation is None or round_record is None:
@@ -47,19 +47,18 @@ async def load_runtime_context(session, *, investigation_id, round_id, execution
     context = InvestigationRuntimeContext(
         investigation=ledger._read(investigation, InvestigationRecord),
         round=ledger._read(round_record, RoundRecord),
-        execution=KnowledgeExecutionContext.model_validate_json(execution.model_dump_json()),
-        authorize_resource=authorize_resource, authorize_knowledge=authorize_knowledge,
-        allow_unscoped=allow_unscoped,
+        actor_id=actor_id, tools=tools, timeout_seconds=timeout_seconds,
+        authorize_resource=authorize_resource,
     )
     check_runtime(context, action)
     return context
 
 
 async def _bound_context(session, context, action):
-    trusted = check_runtime(context, action)
+    trusted = knowledge_execution(context, action)
     current = await load_runtime_context(session, investigation_id=context.investigation.investigation_id,
-        round_id=context.round.round_id, execution=trusted, authorize_resource=context.authorize_resource,
-        authorize_knowledge=context.authorize_knowledge, action=action, allow_unscoped=context.allow_unscoped)
+        round_id=context.round.round_id, actor_id=context.actor_id, tools=context.tools,
+        authorize_resource=context.authorize_resource, action=action, timeout_seconds=context.timeout_seconds)
     if current.investigation != context.investigation or current.round != context.round:
         raise InvestigationAccessError("运行上下文与持久化调查事实不一致")
     return trusted

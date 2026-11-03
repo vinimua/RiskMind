@@ -22,6 +22,7 @@
 ## 2. 图调用方式
 
 ```python
+from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.recovery import FirstRoundRecovery
 
@@ -33,9 +34,10 @@ async with sessions() as session:
         session,
         investigation_id=investigation_id,
         round_id=round_id,
-        execution=current_execution_context,
+        actor_id=current_execution_context.actor_id,
+        timeout_seconds=current_execution_context.timeout_seconds,
+        tools=(KnowledgeSearchTool(current_execution_context, knowledge_policy),),
         authorize_resource=resource_policy,
-        authorize_knowledge=knowledge_policy,
         action=InvestigationAction.CONTINUE,
     )
 
@@ -48,7 +50,7 @@ execution 的 actor/scope/profile/预算由可信调用方提供，不从 Agent 
 8D-3 起图调用必须显式包装 InvestigationInvocation，不再兼容裸 Runtime 自动包装。
 非持久化图入口已退役；首次持久化执行和恢复统一使用上述 runner。当前权限必须同时允许 READ 和 CONTINUE。
 如需明确接续既有正式计划，可额外传 plan_id；新调查无需提前准备计划。
-authorize_resource 接收 `(actor_id, action, InvestigationResource)`；authorize_knowledge 继续使用 7A 的签名。
+authorize_resource 接收 `(actor_id, action, InvestigationResource)`；KnowledgeSearchTool.authorize 继续使用 7A 的签名。
 两者都必须显式返回 True，不能用 1、非空对象或异常代替授权。
 
 graph 不再接收构图时的 execution_context/authorize 参数，也没有兼容性默认身份。
@@ -57,7 +59,7 @@ graph 不再接收构图时的 execution_context/authorize 参数，也没有兼
 未改变 objective → Query Formulation → ToolRequest → 7A 的顺序。
 
 State 不增加认证凭据或策略函数，仍只有规划/执行/解释及轮次状态；案件保持 OPEN。
-当前图调用仍是首轮执行，不会根据账本自动跳过旧任务，不是恢复入口。
+当前 runner 统一执行首次运行与恢复；历史复用由账本 phase executor 决定。
 身份按次提供不意味着所有依赖天然线程安全；共享 Agent/client 必须遵守其自身并发约束，不保存当前 actor。
 
 ## 3. 案件目标与 scope
@@ -72,7 +74,7 @@ canonical MonitoringAlert.model_id 或 UserQuery.model_id
 ```
 
 案件有 model_id 时，scope.model_id 缺失和不一致都拒绝。
-案件没有 model_id 时，可信应用必须明确传 allow_unscoped=True，并仍通过资源策略授权；不是默认全库放行。
+案件没有 model_id 时，可信应用必须在 KnowledgeSearchTool 上明确传 allow_unscoped=True，并仍通过资源策略授权；不是默认全库放行。
 不增加 tenant/time window 新字段，不能宣称已经支持这些隔离维度。
 
 Context 可由可信应用直接构造用于内部测试；生产入口应从 canonical 仓储加载，不能相信请求体自报的 InvestigationRecord。
