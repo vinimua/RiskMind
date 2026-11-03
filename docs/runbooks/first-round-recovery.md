@@ -7,7 +7,10 @@
 
 | 文件 | 职责 |
 |---|---|
-| `workflow/recovery.py` | 受控恢复入口、LangGraph 节点、逐阶段入账、运行独占和代次 fencing |
+| `workflow/graph.py` | 唯一拓扑定义；按可信 Runtime 分派普通/恢复节点执行逻辑 |
+| `workflow/state.py` | 两种入口共用的业务状态与可选检查点身份 |
+| `workflow/invocation.py` | 每次调用的可信 Runtime 包装，恢复控制信息不进入 State |
+| `workflow/recovery.py` | 受控恢复入口、恢复节点执行函数、逐阶段入账、运行独占和代次 fencing；不建图 |
 | `workflow/checkpoints.py` | 官方 AsyncPostgresSaver 的显式创建/初始化；JSON-only 序列化 |
 | `workflow/persistence/recovery_contracts.py` | FirstRoundSpec、RecoveryPolicy、RunClaim 与 PhaseArtifact v2 |
 | `workflow/persistence/recovery_models.py` | 运行身份、调用代次、Attempt 归属与不可变结果选择 |
@@ -19,15 +22,17 @@ FirstRoundRecovery 是安全入口，不另建调度器。节点与推进仍全�
 
 ```text
 Accepted Plan
-    ↓ load_plan
+    ↓ prepare_plan（恢复时读取 Accepted Plan）
 task_execution
     每个 Task：Query phase → Execution phase
     ↓
 Observation phase
     ↓
-finish_round → END
+replanning（当前仅结束本轮，案件 OPEN）→ END
 ```
 
+8D-1 统一为 graph.py 中同一份拓扑定义；FirstRoundRecovery 通过同一个 builder 编译图，
+不是强制所有调用共享同一个 compiled object。普通入口与恢复入口的内部执行机制仍分别保留。
 已有 8B build_investigation_graph 继续提供非恢复首轮入口；生产调用方应明确选择入口，
 不能通过非恢复入口重新调用同一已执行轮次并声称已经获得去重保证。
 
@@ -188,7 +193,10 @@ TaskExecutionResult(status=FAILED, error.code=QUERY_FORMULATION_*)
 
 ## 10. checkpoint 的安全与完整性
 
-checkpoint 只保存 JSON wire state，带 checkpoint_schema_version=1。
+恢复 checkpoint 只保存 JSON wire state，8D-1 使用 checkpoint_schema_version=2 标识统一拓扑。
+旧 8C v1 检查点不会被自动转换；明确拒绝并要求显式迁移，不能删除历史或改 thread_id 绕过。
+本次不提供旧检查点迁移工具；部署前必须确认在途运行和旧检查点，不能宣称滚动兼容。
+独立的 load_plan / finish_round 待执行节点同样明确拒绝，不静默跳过。
 不保存 actor、authorize 函数、客户端、数据库连接或任意 Python 类构造信息。
 JSON serializer 拒绝 pickle/msgpack/未知类型和非有限数值；任务错误只保存异常类型，不持久化原始异常正文。
 

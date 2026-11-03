@@ -8,6 +8,7 @@ import subprocess
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select, text
@@ -136,6 +137,63 @@ def test_real_checkpointer_reopen_reuses_all_results_and_original_snapshots(data
             async with sessions() as session:
                 assert len(list(await session.scalars(select(ResultRow)))) == 5
                 assert all(row.actor_id == "A" for row in await session.scalars(select(AttemptRow)))
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("old_node", ["load_plan", "finish_round"])
+def test_old_topology_pending_node_is_rejected_before_external_call(database, monkeypatch, old_node):
+    agent = Agent()
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            async def old_checkpoint(*_):
+                return SimpleNamespace(values={}, next=(old_node,))
+            monkeypatch.setattr(runner._graph, "aget_state", old_checkpoint)
+            with pytest.raises(ledger.LedgerIntegrityError, match="旧拓扑"):
+                await runner.ainvoke(plan_id="P", context=await context(sessions))
+            assert agent.events == []
+            async with sessions() as session:
+                assert (await session.scalars(select(AttemptRow))).all() == []
+    asyncio.run(scenario())
+
+
+def test_recovery_uses_shared_replanning_and_topology(database, monkeypatch):
+    from risk_platform.workflow import graph as graph_module
+    agent = Agent()
+    retrieval(monkeypatch, agent)
+    calls = []
+    original = graph_module.replanning
+    def shared_replanning(state):
+        calls.append(state["observation"])
+        return original(state)
+    monkeypatch.setattr(graph_module, "replanning", shared_replanning)
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            assert set(runner._graph.get_graph().nodes) == {
+                "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
+            }
+            result = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            assert result["round_complete"] and result["investigation_status"] == "OPEN"
+            assert len(calls) == 1 and calls[0]["status"] == "SUCCEEDED"
+    asyncio.run(scenario())
+
+
+def test_old_checkpoint_version_is_rejected_without_reexecuting(database, monkeypatch):
+    agent = Agent()
+    retrieval(monkeypatch, agent)
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            await runner.ainvoke(plan_id="P", context=await context(sessions))
+            events = list(agent.events)
+            async with sessions() as session:
+                run = (await session.scalars(select(InvestigationRunRow))).one()
+            await runner._graph.aupdate_state({"configurable": {"thread_id": run.run_id}},
+                                             {"checkpoint_schema_version": 1})
+            with pytest.raises(ledger.LedgerIntegrityError, match="版本不兼容"):
+                await runner.ainvoke(plan_id="P", context=await context(sessions))
+            assert agent.events == events
     asyncio.run(scenario())
 
 

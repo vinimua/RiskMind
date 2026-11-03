@@ -9,15 +9,24 @@ from risk_platform.workflow.observation import RoundObservation
 
 
 class InvestigationState(TypedDict):
-    """State shared by the nodes in the investigation skeleton."""
+    """唯一调查图的共享业务状态。
 
-    planning_input: InitialPlanningInput
-    investigation_plan: NotRequired[InvestigationPlan]
+    普通执行保留类型化业务对象；恢复入口使用 JSON 字典/列表写入检查点，
+    对应执行函数重新校验为业务对象。执行模式由可信 runtime 决定，不由字段决定。
+    """
+
+    planning_input: InitialPlanningInput | dict
+    investigation_plan: NotRequired[InvestigationPlan | dict]
     # 仅保存本轮执行事实，初始规划时重置；可信身份/鉴权器不放入模型可写 State。
-    task_execution_results: NotRequired[list[TaskExecutionResult]]
+    task_execution_results: NotRequired[list[TaskExecutionResult] | list[dict]]
     # 7C 解释结果；None 表示本轮尚未解释，避免复用上一轮的 Observation。
-    observation: NotRequired[RoundObservation | None]
+    observation: NotRequired[RoundObservation | dict | None]
     # 表示本轮图调用结束，不保证每个任务成功，更不代表案件已完成。
     round_complete: NotRequired[bool]
     # 现阶段没有案件关闭能力；后续真实生命周期实现时再扩展状态。
     investigation_status: NotRequired[Literal["OPEN"]]
+
+    # 恢复入口的 JSON 检查点身份；仅用于核验，不能决定执行模式或授予权限。
+    checkpoint_schema_version: NotRequired[int]
+    run_id: NotRequired[str]
+    plan_id: NotRequired[str]

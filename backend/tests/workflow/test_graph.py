@@ -11,6 +11,7 @@ from risk_platform.workflow.contracts import (
 )
 from risk_platform.workflow.graph import _route_after_replanning, build_investigation_graph
 from risk_platform.workflow.nodes import initial_planning, replanning
+from risk_platform.workflow.invocation import InvestigationInvocation
 from test_runtime import make_runtime
 
 
@@ -53,6 +54,33 @@ def test_investigation_graph_compiles() -> None:
     graph = _graph(FakeInvestigationAgent(_plan()))
 
     assert graph is not None
+
+
+def test_single_topology_owns_both_modes() -> None:
+    graph = _graph(FakeInvestigationAgent(_plan()))
+    assert set(graph.get_graph().nodes) == {
+        "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
+    }
+    # 恢复模块只能提供执行机制，不能再构造自己的 StateGraph。
+    import ast
+    import inspect
+    from risk_platform.workflow import recovery
+    tree = ast.parse(inspect.getsource(recovery))
+    assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                   and node.func.id == "StateGraph" for node in ast.walk(tree))
+    assert not hasattr(recovery, "RecoveryState")
+
+
+def test_trusted_wrapper_keeps_normal_execution_and_state_cannot_select_recovery() -> None:
+    source = _planning_input()
+    graph = _graph(FakeInvestigationAgent(_plan()))
+    runtime = make_runtime(source, authorize_knowledge=lambda *_: False)
+    result = asyncio.run(graph.ainvoke({
+        "planning_input": source, "mode": "RECOVERY", "run_id": "untrusted",
+        "plan_id": "untrusted", "checkpoint_schema_version": 1,
+    }, context=InvestigationInvocation(runtime=runtime)))
+    assert result["task_execution_results"][0].status == "REJECTED"
+    assert result["round_complete"] and result["investigation_status"] == "OPEN"
 
 
 def test_round_ends_but_investigation_remains_open() -> None:

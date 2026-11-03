@@ -407,6 +407,9 @@ Stage 8A 已实现独立的 PostgreSQL 调查执行账本：稳定身份、canon
 Operation v1 与 Runtime Context 的耦合通过 v2 业务输入及显式兼容投影处理，原摘要与历史不改写。
 P2-4/5/9 已解决；保留 P2-10（旧应用写入不兼容 0005）与 P2-11（8C 历史复用权限组合）。
 Stage 8C 已新增从 Accepted Plan 开始的首轮恢复入口：PG checkpoint、phase 账本复用、显式恢复策略与代次 fencing，待 review。
+Stage 8D-1 将 topology 收敛到 graph.py：prepare_plan → task_execution → observation → replanning。
+普通/恢复模式只由每次调用的可信 Runtime 决定；共享 InvestigationState，恢复机制不再创建第二张图。
+只统一拓扑，不统一 phase 执行协议；非恢复入口仍没有账本去重保证。新恢复检查点为 v2，旧 v1 明确拒绝且需显式迁移。
 原非恢复入口不自动获得去重保证；尚未实现多轮 Replanning、通用 Capability Router/Tool Registry 或恢复 Web API。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
