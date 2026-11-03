@@ -153,3 +153,13 @@ statement/narrative 一定由原文语义蕴含，也不能靠非空 limitation 
 
 Query Formulation 与本次 Observation 的模型语义质量均仍需专项验证。
 不在 7C 顺手修复这些 P2，也不提前扩展案件 OPEN 之外的生命周期状态。
+
+## Review 后续记录
+
+7C 已 review 封板：结构与引用完整性 VERIFIED，自然语言语义质量仍 INCONCLUSIVE。
+新增 P2-6：真实引句是否支持 statement 尚无确定性语义证明。
+新增 P2-7：ObservationSource.source 指 supporting Child，引句可能只位于 Parent Context，
+后续 citation API/UI 不能误认为 quote 一定位于该 Child。
+
+下一阶段先 review [持久化、恢复与幂等边界](../workflow-persistence-resume-design.md)，
+不继续扩 Observation，也不先实现第二轮 Replanning。

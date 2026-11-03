@@ -1,0 +1,179 @@
+# Stage 8：持久化、恢复与幂等边界
+
+状态：待 review 的设计，尚未实现迁移、执行账本、持久化 checkpointer 或恢复 API。
+7A/7B/7C 保持封板；本阶段先处理恢复边界，不实施多轮 Replanning。
+
+## 1. 为什么不能只加 checkpointer
+
+当前 task_execution 在一个节点中执行整轮多个任务，节点最后才返回 State 更新。
+即使图保存节点检查点，节点中途崩溃仍可能再次调用已经完成的外部服务。
+
+```text
+T0 已完成，T1 执行中进程崩溃
+    ↓
+图重新进入 task_execution
+    ↓
+若无业务执行记录，T0 的 Query/Embedding 可能再次调用
+```
+
+需要区分两类存储：
+
+| 存储 | 保存什么 |
+|---|---|
+| LangGraph checkpoint | thread 的图状态、节点推进信息 |
+| PG 业务执行记录 | 调查/轮次、计划、调用尝试、结果与解释的稳定身份和载荷 |
+
+它们即使位于同一个数据库，也不能未经实现证明就假设跨连接原子提交。
+PG 账本提供执行事实与幂等依据，不成为第二个流程编排器。
+
+## 2. 小步路线
+
+```text
+8A：稳定身份、输入摘要、持久化契约与 PG 仓储
+8B：单次调用的可信 runtime context、范围绑定、恢复鉴权
+8C：持久化 checkpointer、节点内已完成阶段复用
+8D：真实 PG 并发、重启与崩溃窗口验收
+```
+
+下一小步只做 8A，暂不改图执行策略。8B 完成前，禁止把绑定 Actor A 的 compiled graph 作为跨用户/案件 singleton。
+
+## 3. 身份分别负责什么
+
+| 身份 | 语义 |
+|---|---|
+| investigation_id | 系统创建的调查身份，案件仍 OPEN |
+| round_id | 本轮身份，恢复不另建新一轮 |
+| plan identity/version | 已接受的不可变计划，正式 task_id 不在恢复时重新生成 |
+| task_id | 正式计划中的任务身份 |
+| operation_key | 某任务某阶段的逻辑工作身份 |
+| attempt_id | 外部调用前登记的一次尝试 |
+| execution_id | 已封板 7A 返回的执行事实身份，结果提交后稳定复用 |
+| observation_id | 已封板 7C 返回的一次解释身份，不被重试原地覆盖 |
+
+不要把逻辑任务与尝试次数混成一个 ID。外层 attempt_id 可以关联 7A execution_id，不必先重写已封板生成器。
+
+## 4. 输入摘要与幂等规则
+
+- 同一 operation_key + 同一 input_digest：复用已提交结果。
+- 同一 key + 不同 digest：冲突，不覆盖或静默重跑。
+- 摘要区分调查/轮次/任务、阶段、请求、可信范围、profile 和契约版本。
+- 保存候选 query request 与 7A 实际生效 request，不能丢掉 scope 收紧后的真实参数。
+- 模型调用记录模型名和 prompt/version 摘要，修改模型后的再解释不是旧结果恢复。
+- 记录 schema_version，避免未来读取旧载荷时错误套用新契约。
+
+不保存 API Key、authorize 函数、数据库连接或客户端对象。保存的 actor 身份只是审计关联，不代表永久授权。
+
+## 5. 已完成结果与失败结果
+
+已提交结果应保持原 execution_id、observation_id、载荷与 RetrievalRouteSnapshot，不重新调用模型或重新读取当前 route。
+
+FAILED、REJECTED、零命中和 INCONCLUSIVE 同样是有效历史结果。恢复默认保留原事实；显式重试创建新 attempt，不能抹掉失败记录写成成功。
+
+已接受的计划在恢复时复用，不能重走 Initial Planning 生成新 task_id，再把旧任务结果挂到新任务上。
+
+## 6. 不确定外部调用不能承诺 exactly-once
+
+```text
+LLM / Embedding 已返回
+    ↓
+保存结果前进程崩溃
+    ↓
+PG 只有尝试记录，无法证明是否完成或已计费
+```
+
+知识读取与模型调用可在显式策略下再次尝试，但必须保留不确定的历史尝试，并承认可能重复费用。
+checkpoint、租约和 UUID 都不能消除该窗口。
+
+未来训练、审批、发布等有业务副作用的服务，必须接受稳定幂等键或提供可查询收据。不能照搬知识读取的重试策略。
+
+## 7. 7B 节点内部的恢复粒度
+
+需要分别保存：计划、每个任务的 Query Request、每个 Execution Result、整轮 Observation。
+
+```text
+进入节点 → 查业务记录
+    ├── 结果已提交：授权读取、核对身份/摘要、复用
+    ├── 尚未执行：登记尝试，再调用
+    └── 执行中或不确定：按显式恢复策略处理
+```
+
+可以在 LangGraph 节点内部访问持久化记录，或受控重组节点边界，但不另建 DAG scheduler。
+旧 7B 入口要求全部任务 PENDING，不能直接把已完成计划塞回去当作恢复。
+
+## 8. checkpoint 与业务记录的协调
+
+| 崩溃窗口 | 恢复要求 |
+|---|---|
+| 业务结果已提交，checkpoint 尚未保存 | 重入节点时复用业务记录，避免再次调用 |
+| checkpoint 已推进，但业务记录缺失/损坏 | 完整性失败，不以图状态代替业务事实 |
+
+结果应在节点返回 State 更新之前可靠提交；写入失败不能继续推进到看似完成的阶段。
+8A 不承诺已经完成这套图集成。
+
+## 9. 并发和过期 worker
+
+唯一约束阻止重复 operation 登记；短事务领取租约或条件更新协调重复恢复请求。
+网络调用期间不要长期持有 PG 独占事务。
+
+租约到期后，旧 worker 可能仍在执行。提交必须核对当前 attempt/token，阻止过期 worker 覆盖新结果；这不能撤销旧请求已经产生的计费。
+无需并发 DAG，也必须测试同一恢复请求重复到达时只接受一个最终提交。
+
+## 10. 路由变化的边界
+
+已提交的知识结果永远保留原 snapshot。尚未提交的调用重试时，当前 7A 会重新 resolve route，可能搜索新集合。
+首版必须将后者记录成新 attempt，不能宣称恢复了原来的搜索快照。
+
+如果必须让不确定尝试也复用原 snapshot，需要另行设计持久化路由后执行搜索的接口；不能只靠外部账本推断已经解决。
+
+## 11. 可信上下文按次提供
+
+共享图结构与单次可信运行上下文分开。身份、authorize、客户端等不进入模型可写 State 或 checkpoint。
+恢复时重新认证，并验证调用方有权读取/继续 investigation_id 与 round_id。
+
+thread_id 只是定位键，不是访问令牌。权限撤销时，即使结果已经缓存也不能绕过读取授权。
+
+当调查绑定明确 model_id 时，登记的调查目标、planning input 和 execution scope 必须满足相同范围约束。
+scope 缺失不能默认放行全库；通用无模型问题应由可信应用明确授权其范围。
+
+7B 的构图上下文绑定和案件 model_id/scope 绑定两项 P2，在共享图或多用户恢复入口启用前必须解决。
+
+## 12. 8A 最小交付
+
+1. 调查/轮次系统身份和不可变输入记录，不扩案件 OPEN 之外的生命周期。
+2. 计划、请求、执行结果、Observation 的持久化载荷契约。
+3. operation key/input digest 复用及冲突语义。
+4. attempt 与结果身份关联，不虚构外部调用恰好一次。
+5. PG FK、唯一约束、事务、不可变检查。
+6. 真实 PG 迁移、重复请求与并发测试。
+
+不顺带实现 Web API、Celery、多轮 Replanning 或全部图节点恢复。
+
+## 13. 后续恢复验收
+
+- 同请求重放复用调查与轮次，异内容冲突。
+- 已保存计划恢复后 task_id 不变。
+- T0 已完成再崩溃，恢复不重复调用 T0。
+- 外部完成但未保存，保留不确定尝试并按策略创建新 attempt。
+- 业务结果已保存但 checkpoint 缺失，节点复用旧记录。
+- Observation 恢复保留原身份；重新解释形成新尝试。
+- 重复恢复请求、租约过期与旧 worker 返回不会覆盖合法结果。
+- Actor B 不能仅凭 Actor A 的 thread_id 读取或恢复。
+- 调查 model_id/scope 错配在外部调用前拒绝。
+- route 切换不改变已提交结果快照。
+- 损坏或缺失业务记录不被当作执行成功。
+- 零命中、失败和拒绝不因恢复被混淆；案件仍 OPEN。
+
+## 14. 已有 P2 与质量结论
+
+继续记录七项 P2：私有 scalar 依赖、缺 tool_name、scope 字段有限、构图绑定身份、案件 model_id/scope 未绑定、statement/quote 语义蕴含未验证，以及 source 是 supporting Child 而非必然承载引句的 Child。
+
+持久化阶段应明确 tool_name/schema_version 的审计身份，但不因此引入未来所有工具的通用框架。涉及已封板契约的修改单独 review。
+
+Query Formulation 与 Observation 自然语言语义质量仍 INCONCLUSIVE。持久化只保存实际产物，不会把它们升级为 Evidence 或当前根因结论。
+
+## 15. 框架机制参考
+
+- [LangGraph Persistence](https://docs.langchain.com/oss/python/langgraph/persistence)：checkpoint 保存 thread 状态；内存 saver 不跨进程重启保留。
+- [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)：节点执行与 runtime context 机制。
+
+框架支持这些能力不等于 RiskMind 已配置；业务幂等和权限仍需应用实现。
