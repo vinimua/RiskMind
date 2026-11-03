@@ -1,6 +1,6 @@
 # Stage 8：持久化、恢复与幂等边界
 
-状态：Stage 8 Design APPROVED（2026-11-03）。8A 的迁移、账本契约与 PostgreSQL 仓储已实现，待 review。
+状态：Stage 8 Design APPROVED。Stage 8A 的迁移、账本契约与 PostgreSQL 仓储已 review SEALED，P1=0。
 实现与实测结果见[调查执行账本](runbooks/investigation-ledger.md)。尚未接入图节点、持久化 checkpointer 或恢复 API。
 7A/7B/7C 保持封板；本阶段先处理恢复边界，不实施多轮 Replanning。
 
@@ -278,11 +278,112 @@ candidate_request 与 effective_request 必须明确区分；尚未由 7A 得到
 
 这些测试证明账本能区分事实；不宣称已经完成 LangGraph 重启恢复或外部调用 exactly-once。
 
-## 17. Review 状态与 P2-8
+## 17. Review 状态与 P2-8 / P2-9
 
-Stage 7A / 7B / 7C 继续 SEALED；Stage 8 Design APPROVED，未发现需要推翻路线的 P1。
+Stage 7A / 7B / 7C / 8A 均 SEALED；Stage 8 Design APPROVED，review P1=0。
 原有七项 P2 保留。
 
 P2-8：未来是否使用 LangGraph node 内 task 作为更细粒度 checkpoint 的实现选项，留到 8C 决定。
 即使采用该机制，也不能替代包含身份、尝试历史、输入摘要、载荷版本、路由快照及审计关联的业务执行账本。
 8A 不因此修改既有图结构。
+
+P2-9：OperationInput v1 的不可变业务输入与 per-run/per-attempt Runtime Context 尚未完全分离。
+actor_id 或 timeout 改变会改变摘要，这是当前明确的 fail-closed 行为，不据此重开 8A。
+8B 需要通过显式版本演进解决授权接续与每次尝试的实际 actor 审计，不能偷偷重解释 v1。
+
+## 18. Stage 8B：可信运行上下文与授权边界
+
+以下为 8B 的实现前设计，尚未实现。8A 的 schema 与迁移继续保持封板。
+本小步先解决共享图的安全调用和账本访问前置条件；将账本接入节点重放、checkpointer 和真正恢复执行留到 8C。
+
+### 18.1 三种信息分开
+
+| 信息 | 负责什么 | 是否属于可写 State |
+|---|---|---|
+| 不可变 Operation 业务输入 | 定义逻辑工作；决定输入冲突与产物可否作为同一工作复用 | 只能由可信服务构造并入账，不能信任模型回写 |
+| per-run Runtime Context | 当前认证 actor、调查/轮次定位、当前 scope/profile、权限检查器、执行预算 | 否 |
+| per-attempt 审计信息 | 谁发起这一次尝试，以及本次实际使用的范围与预算 | 否；在开始尝试时形成持久化事实 |
+
+可复用 compiled graph 不能永久 partial 绑定 Actor A 的 execution_context。
+图可持有可安全共享的结构与依赖，但身份、案件定位和授权必须由可信应用按次提供，不能从旧 checkpoint 恢复为当前权限。
+State 中的 planning_input、task_id 或 thread_id 均不构成授权凭据。
+本阶段仍保留 round_complete 与 investigation_status=OPEN，不扩展案件关闭能力。
+
+### 18.2 按阶段定义稳定输入
+
+不能简单对所有阶段统一“从 context 删除两个字段”。需要分别依据实际业务输入建模：
+
+| 阶段 | 稳定输入应覆盖 | 当前身份/预算的处理 |
+|---|---|---|
+| Query Formulation | 已接受计划与规划来源、正式任务、模型/prompt 版本、实际传给模型的 max_top_k | actor/当前授权/timeout 不因换人而改变模型输入；max_top_k 当前会进入模型，因此属于该阶段输入 |
+| Knowledge Execution | 正式任务、candidate request、确定的生效业务范围/profile、query/top_k 等实际参数 | 当前 actor 与预算重新提供；当前授权还必须允许该业务范围和请求，不能靠旧结果绕过 |
+| Observation | 正式计划、按顺序关联的不可变执行结果、模型/prompt 版本 | actor/timeout 不改变历史结果内容；读取这些结果仍需当前权限 |
+
+effective request 在实际确定前不能虚构为已知输入；8B 实现需明确其形成时点及与 candidate 的关联，
+不能把外部调用后的未知信息追写进已经登记的不可变输入。
+每个阶段仍使用有版本契约、canonical JSON 和摘要校验。
+
+### 18.3 调查、模型与 scope 的确定性绑定
+
+```text
+持久化 Investigation 的 planning_input
+    → 确定调查目标 model_id
+    → 核对当前受信任 scope
+    → 核对本次图输入/正式计划归属
+    → 鉴权
+    → 才能进入模型或知识工具
+```
+
+MonitoringAlert.model_id 或 UserQuery.model_id 存在时，执行范围必须确定性绑定到同一目标。
+scope.model_id 缺失不能被解释成允许全库；v3/v4 错配在任何外部调用前拒绝。
+没有 model_id 的通用调查必须由可信应用明确授权其范围，不能由 query 文本声明“允许全库”。
+调查/轮次/计划关联仍以账本为准，不能因为运行时传了另一个 ID 就改变原计划归属。
+8B 不顺带设计 tenant/time window 新字段；当前 scope 无法表达的隔离不能声称已经支持。
+
+### 18.4 读取与继续执行分别鉴权
+
+明确区分应用动作：读取调查结果与继续调查执行。
+每次读取缓存产物、重新执行或未来恢复，都必须根据当前 actor 与调查资源重新检查权限，显式 True 才放行。
+授权异常、权限撤销、调查归属或 scope 错配均 fail-closed，不能回退使用旧授权或切换 profile/collection。
+
+```text
+Actor B 提供 investigation/round 定位
+    → 当前认证与资源权限检查
+    → 验证当前允许范围覆盖所请求的历史结果
+    → 读取原始已提交产物 / 获准继续
+```
+
+授权所需最小资源元数据可由可信仓储查询；完整 Context、Observation 和来源内容不得在授权前交给模型或调用方。
+允许读取不自动等于允许发起新的外部调用。
+当前 scope 若不能覆盖原结果，不允许静默删掉部分命中后冒充原结果复用成功。
+账本仓储仍只保存事实，不成为权限策略引擎或第二个业务编排器。
+
+### 18.5 创作者与尝试发起人分别审计
+
+Operation 记录谁最初定义逻辑工作；每个新 Attempt 记录本次 authenticated actor。
+Actor B 获准接续后，不能因为 Operation 创作者是 A，就把 B 的新 Attempt 仍记为 A。
+运行时超时预算、当前授权决策及实际执行范围应与该次尝试关联，不覆盖旧尝试的审计事实。
+
+既有 8A Attempt 没有独立 actor 字段，因此不能把 Operation.context.actor_id 当作已被证明的 Attempt actor 回填。
+兼容读取需明确标记旧记录缺少尝试级归因；新写入路径必须提供可信尝试身份。
+具体新增字段和约束通过新迁移实现，不改写 0004 或破坏原结果身份、载荷及快照。
+
+### 18.6 旧 v1 的兼容不能偷换摘要语义
+
+不能原地去掉 v1 actor/timeout 后重算 input_digest，也不能给旧记录套用新 schema_version。
+新契约必须显式区分版本，并处理同 operation_key 已存在 v1 记录的情况，避免 v2 重登记必然冲突。
+
+兼容读取先按 v1 规则验证原始完整 payload 与 digest，再执行当前权限及稳定业务输入校验。
+Actor B 的当前 context 不得直接替换旧 payload 后送给 v1 register_operation/inspect_operation。
+是否提供 legacy 接续适配器、哪些旧记录必须拒绝接续，在实现前明确并测试；不能默认“忽略 actor 即可复用”。
+即使允许继续，也保持原 attempt/execution/observation ID 和路由快照，新的尝试另记身份。
+
+### 18.7 8B 验收与排除项
+
+必须验证同一 compiled graph 顺序及并发处理两个 actor/调查时，身份、权限和 scope 不串用。
+同一调查中 A 首次执行、B 获准读取/继续时，不产生仅由换人造成的业务输入冲突，且新 Attempt 归因 B。
+未授权 B、已撤权 A、scope/model 错配、缺少可信 runtime context 均在模型/工具调用前失败。
+v1 记录摘要与产物不变；兼容缺口显式报错，不伪造旧 Attempt actor；真实 PG 验证迁移与审计约束。
+
+暂不实现持久化 checkpointer、节点断点恢复、自动重试、租约接管、resume Web API、多轮 Replanning 或 Celery。
+8B 为这些后续能力提供安全边界，不宣称现有账本已经接入自动恢复。

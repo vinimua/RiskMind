@@ -1,6 +1,6 @@
 # Stage 8A：调查执行账本
 
-状态：已实现，待 review。8A 没有接入 LangGraph 节点、checkpoint、恢复入口、自动重试或 Web API。
+状态：Stage 8A SEALED，review P1=0。8A 没有接入 LangGraph 节点、checkpoint、恢复入口、自动重试或 Web API。
 7A/7B/7C 的执行方式保持原样，因此现有图运行不会自动写入本账本。
 
 ## 1. 代码与表的对应关系
@@ -175,6 +175,11 @@ git diff --check
 
 ## 9. 后续边界
 
-下一轮先 review schema、触发器、事务和并发行为，不自动进入 8B/8C。
+schema、触发器、事务和并发行为已通过 review。下一阶段为 8B 的可信运行上下文与权限边界。
 已有七项 P2 及设计 P2-8 保留；多用户恢复前需解决 per-run context 和案件 model_id/scope 绑定。
 当前失败/不确定尝试结算必须由可信调用方明确决定，没有自动失联检测或自动重试。
+
+P2-9：v1 OperationInput 保存完整 KnowledgeExecutionContext，actor_id/timeout 等运行字段也影响输入摘要。
+当前行为 fail-closed，不重开 8A。8B 需区分不可变业务输入与每次调用的当前身份/授权/预算，
+并记录每个新 Attempt 的真实发起人。旧 Attempt 不能从 Operation 的 actor 推断成已经证明的实际执行人。
+具体边界见 [Stage 8B 设计](../workflow-persistence-resume-design.md#18-stage-8b-可信运行上下文与授权边界)。

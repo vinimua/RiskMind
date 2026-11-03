@@ -403,6 +403,8 @@ FAILED/REJECTED 映射任务 FAILED，具体原因保留在结构化结果中。
 可信 context/authorize 由构图调用方注入，不放入模型可写 State；图使用 ainvoke。
 Stage 7C 已接入结构化 Observation 与确定性执行/来源引用校验。
 Stage 8A 已实现独立的 PostgreSQL 调查执行账本：稳定身份、canonical digest、不可变计划/结果与尝试历史。
+8A 已 review SEALED，P1=0。下一步 8B 先明确 per-run 身份/授权、调查 scope 绑定与尝试级 actor 审计；
+Operation v1 与 Runtime Context 耦合记录为 P2-9，契约演进不能重写旧摘要或历史。
 账本尚未接入图节点；尚未实现真实 Replanning、通用 Capability Router/Tool Registry 或工作流持久化恢复。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
