@@ -2,6 +2,9 @@
 
 状态：已实现，待 review。本次只收敛拓扑，不进入 Stage 9，不合并普通执行与恢复执行的阶段协议。
 
+后续状态：8D-1 已 review SEALED；本文保留该阶段的结构说明。
+8D-2 已进一步删除独立恢复任务循环，当前实现见 [阶段执行收敛](workflow-phase-execution-convergence.md)。
+
 ## 1. 唯一拓扑
 
 `workflow/graph.py::build_investigation_graph()` 是唯一创建 `StateGraph`、注册节点和连接边的地方：

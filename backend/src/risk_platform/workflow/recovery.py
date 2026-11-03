@@ -15,12 +15,11 @@ from sqlalchemy.pool import NullPool
 
 from risk_platform.agents.prompts import KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT, KNOWLEDGE_QUERY_SYSTEM_PROMPT
 from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, TaskExecutionResult
-from risk_platform.execution.knowledge import execute_knowledge_search
 from risk_platform.workflow import access, nodes
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.observation import RoundObservation
-from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime, knowledge_authorizer
+from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.business_inputs import BusinessOperationInput
 from risk_platform.workflow.persistence.contracts import AcceptedPlan, OperationType, canonical_json, input_digest, operation_key
@@ -243,11 +242,6 @@ async def _phase(sessions, invocation, value, produce):
     return artifact
 
 
-def _failed_query(task, error, started):
-    return PhaseArtifact(execution=TaskExecutionResult(execution_id="exec-" + uuid4().hex, task_id=task.task_id,
-        capability=task.capability, status="FAILED", started_at=started, completed_at=datetime.now(timezone.utc), error=error))
-
-
 async def load_accepted_plan(state, invocation, *, sessions):
     """prepare_plan 在恢复模式下的实现；读取正式计划，不重新调用规划模型。"""
     async with sessions() as session:
@@ -258,54 +252,37 @@ async def load_accepted_plan(state, invocation, *, sessions):
                       round_complete=False, investigation_status="OPEN"))
 
 
-async def recoverable_task_execution(state, invocation, *, agent, sessions, embedding_client=None, milvus_client=None):
-    """task_execution 的恢复执行机制；节点顺序由 graph.py 唯一定义。"""
-    plan = InvestigationPlan.model_validate(state["investigation_plan"])
-    results, tasks = [], []
-    source = InitialPlanningInput.model_validate(state["planning_input"])
-    for task in plan.tasks:
-        async def query():
-            trusted = check_runtime(invocation.context, InvestigationAction.CONTINUE, source)
-            started = datetime.now(timezone.utc)
-            candidate, error = await nodes.formulate_task_query(task, source, goal=plan.goal,
-                investigation_agent=agent, trusted=trusted)
-            if error is not None:
-                return _failed_query(task, error, started)
-            try:
-                candidate = KnowledgeSearchToolRequest.model_validate(candidate.model_dump() if isinstance(candidate, BaseModel) else candidate)
-            except (ValidationError, ValueError):
-                return _failed_query(task, ExecutionError(category="VALIDATION", code="QUERY_FORMULATION_INVALID",
-                    message="知识查询构造结果非法，未调用检索工具", retryable=False), started)
-            return PhaseArtifact(query_request=candidate)
-        formed = await _phase(sessions, invocation, _operation(invocation, OperationType.QUERY_FORMULATION, task_id=task.task_id), query)
-        if formed.execution is not None:
-            result = formed.execution
-        else:
-            async def search():
-                trusted = check_runtime(invocation.context, InvestigationAction.CONTINUE, source)
-                result = await execute_knowledge_search(task, formed.query_request, context=trusted,
-                    authorize=knowledge_authorizer(invocation.context), session_factory=sessions,
-                    embedding_client=embedding_client, milvus_client=milvus_client)
-                return PhaseArtifact(execution=result)
-            artifact = await _phase(sessions, invocation, _operation(invocation, OperationType.KNOWLEDGE_EXECUTION,
-                task_id=task.task_id, candidate=formed.query_request), search)
-            result = artifact.execution
-        results.append(result)
-        tasks.append(task.model_copy(update={"status": TaskStatus.COMPLETED if result.status == "SUCCEEDED" else TaskStatus.FAILED}))
-    return _wire(dict(investigation_plan=plan.model_copy(update={"tasks": tasks}), task_execution_results=results))
-
-
-async def recoverable_observation(state, invocation, *, agent, sessions):
-    """observation 的恢复执行机制，保持原有引用校验与账本复用。"""
-    plan = InvestigationPlan.model_validate(state["investigation_plan"])
-    results = [TaskExecutionResult.model_validate(row) for row in state["task_execution_results"]]
-    async def explain():
-        trusted = check_runtime(invocation.context, InvestigationAction.CONTINUE)
-        update = await nodes.observation(dict(investigation_plan=plan, task_execution_results=results),
-                                         investigation_agent=agent, execution_context=trusted)
-        return PhaseArtifact(observation=update["observation"])
-    artifact = await _phase(sessions, invocation, _operation(invocation, OperationType.OBSERVATION, results=results), explain)
-    return _wire(dict(observation=artifact.observation))
+def ledger_phase_executor(sessions, invocation):
+    """把统一节点的业务产物适配到既有账本协议；首次运行和恢复不分支。"""
+    async def execute(kind, produce, *, task_id=None, candidate=None, results=()):
+        value = _operation(invocation, kind, task_id=task_id, candidate=candidate, results=results)
+        async def persistable():
+            # 每个阶段调用前重新检查可信上下文；_phase 另有 PG 归属鉴权与 fencing。
+            check_runtime(invocation.context, InvestigationAction.CONTINUE)
+            if kind == OperationType.QUERY_FORMULATION:
+                started = datetime.now(timezone.utc)
+                outcome = await produce()
+                if outcome.failure is not None:
+                    return PhaseArtifact(execution=outcome.failure)
+                try:
+                    request = KnowledgeSearchToolRequest.model_validate(
+                        outcome.candidate.model_dump() if isinstance(outcome.candidate, BaseModel) else outcome.candidate)
+                except (ValidationError, ValueError):
+                    # 保留 8C 的入账语义：非法候选属于 Query 阶段失败，不能保存为请求。
+                    error = ExecutionError(category="VALIDATION", code="QUERY_FORMULATION_INVALID",
+                        message="知识查询构造结果非法，未调用检索工具", retryable=False)
+                    now = datetime.now(timezone.utc)
+                    return PhaseArtifact(execution=TaskExecutionResult(execution_id="exec-" + uuid4().hex,
+                        task_id=task_id, capability="KNOWLEDGE_RETRIEVAL", status="FAILED",
+                        started_at=started, completed_at=now, error=error))
+                return PhaseArtifact(query_request=request)
+            result = await produce()
+            return PhaseArtifact(execution=result) if kind == OperationType.KNOWLEDGE_EXECUTION else PhaseArtifact(observation=result)
+        artifact = await _phase(sessions, invocation, value, persistable)
+        if kind == OperationType.QUERY_FORMULATION:
+            return nodes.QueryOutcome(candidate=artifact.query_request, failure=artifact.execution)
+        return artifact.execution if kind == OperationType.KNOWLEDGE_EXECUTION else artifact.observation
+    return execute
 
 
 class FirstRoundRecovery:

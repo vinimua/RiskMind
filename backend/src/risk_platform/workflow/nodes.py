@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -15,6 +16,7 @@ from risk_platform.execution.contracts import (
 from risk_platform.execution.knowledge import execute_knowledge_search
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.state import InvestigationState
+from risk_platform.workflow.persistence.contracts import OperationType
 from risk_platform.workflow.observation import (
     complete_observation, inconclusive_observation, summarize_executions,
     validate_round_inputs,
@@ -70,59 +72,111 @@ async def formulate_task_query(task, planning_input, *, goal, investigation_agen
     return (candidate if error is None else None), error
 
 
+@dataclass(frozen=True)
+class QueryOutcome:
+    """内部查询阶段结果；原始候选仅交给 7A 或账本适配器校验。"""
+
+    candidate: object = None
+    failure: TaskExecutionResult | None = None
+
+
+async def direct_phase(kind, produce, **_):
+    """兼容原非持久化入口，只执行阶段，不声称提供账本去重。"""
+    return await produce()
+
+
+def _business_model(model, value):
+    # 两种入口共用节点，JSON 字典与业务对象均重新经过契约校验。
+    return model.model_validate_json(value.model_dump_json()) if hasattr(value, "model_dump_json") else model.model_validate(value)
+
+
+def _task_result(task, result):
+    result = TaskExecutionResult.model_validate_json(result.model_dump_json())
+    if result.task_id != task.task_id or result.capability != task.capability:
+        raise ValueError("执行结果与正式任务身份不一致")
+    return result
+
+
 async def task_execution(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
     execution_context: KnowledgeExecutionContext,
     authorize: Callable[[str, str, KnowledgeExecutionContext], bool],
     session_factory=None, embedding_client=None, milvus_client=None,
     before_task: Callable[[], object] | None = None,
+    execute_phase=None,
 ) -> dict[str, object]:
-    """按计划顺序构造 query 并调用 7A；普通任务失败不阻止后续独立任务。
+    """唯一任务循环；阶段执行器决定直接执行或通过账本复用、提交。
 
-    无自动重试或并发。取消传播；本节点完成后统一返回本轮结果，不提供断点续执行保证。
+    持久化首次执行与恢复使用同一 ledger executor，无历史时创建新 Attempt。
+    原普通入口保留 direct_phase，不提供恢复保证；无自动重试或并发。
     """
-    plan = InvestigationPlan.model_validate_json(state["investigation_plan"].model_dump_json())
-    planning_input = InitialPlanningInput.model_validate_json(state["planning_input"].model_dump_json())
+    phase = execute_phase or direct_phase
+    plan = _business_model(InvestigationPlan, state["investigation_plan"])
+    planning_input = _business_model(InitialPlanningInput, state["planning_input"])
     trusted = KnowledgeExecutionContext.model_validate_json(execution_context.model_dump_json())
     ids = [task.task_id for task in plan.tasks]
     if any(not key.strip() for key in ids) or len(ids) != len(set(ids)):
         raise ValueError("正式任务 ID 必须非空且唯一")
     if not plan.tasks or any(task.status != TaskStatus.PENDING for task in plan.tasks):
-        raise ValueError("首轮执行要求非空且全部待执行的正式任务，不提供恢复或重复执行语义")
-    results = []
-    tasks = []
+        raise ValueError("首轮执行要求非空且全部待执行的正式任务")
+    results, tasks = [], []
     for task in plan.tasks:
         if before_task is not None:
-            before_task()  # 8B 按任务重新检查当前案件继续权限，失败不进入 Query Formulation。
-        started = datetime.now(timezone.utc)
-        candidate, error = await formulate_task_query(
-            task, planning_input, goal=plan.goal, investigation_agent=investigation_agent, trusted=trusted,
-        )
-        if error is not None:
-            # 模型失败也要有系统生成的尝试记录，但不伪造一次已发生的 RAG 调用。
-            result = TaskExecutionResult(
-                execution_id="exec-" + uuid4().hex, task_id=task.task_id, capability=task.capability,
-                status=ExecutionStatus.FAILED, started_at=started, completed_at=datetime.now(timezone.utc), error=error,
+            before_task()
+
+        async def query():
+            started = datetime.now(timezone.utc)
+            candidate, error = await formulate_task_query(
+                task, planning_input, goal=plan.goal, investigation_agent=investigation_agent, trusted=trusted,
             )
+            if error is not None:
+                return QueryOutcome(failure=TaskExecutionResult(
+                    execution_id="exec-" + uuid4().hex, task_id=task.task_id, capability=task.capability,
+                    status=ExecutionStatus.FAILED, started_at=started, completed_at=datetime.now(timezone.utc), error=error,
+                ))
+            return QueryOutcome(candidate=candidate)
+
+        formed = await phase(OperationType.QUERY_FORMULATION, query, task_id=task.task_id)
+        if formed.failure is not None:
+            result = formed.failure
         else:
-            result = await execute_knowledge_search(
-                task, candidate, context=trusted, authorize=authorize, session_factory=session_factory,
-                embedding_client=embedding_client, milvus_client=milvus_client,
-            )
-        result = TaskExecutionResult.model_validate_json(result.model_dump_json())
-        if result.task_id != task.task_id or result.capability != task.capability:
-            raise ValueError("执行结果与正式任务身份不一致")
+            async def search():
+                result = await execute_knowledge_search(
+                    task, formed.candidate, context=trusted, authorize=authorize, session_factory=session_factory,
+                    embedding_client=embedding_client, milvus_client=milvus_client,
+                )
+                # 入账前校验身份，不能先保存错误结果再拒绝写 State。
+                return _task_result(task, result)
+            result = await phase(OperationType.KNOWLEDGE_EXECUTION, search,
+                                 task_id=task.task_id, candidate=formed.candidate)
+        result = _task_result(task, result)
         if any(previous.execution_id == result.execution_id for previous in results):
             raise ValueError("本轮执行记录 ID 不能重复")
         results.append(result)
-        # 不修改输入计划对象。现有 TaskStatus 没有 REJECTED，拒绝仍映射 FAILED，细节留在结果中。
         tasks.append(task.model_copy(update={"status": TaskStatus.COMPLETED
                      if result.status == ExecutionStatus.SUCCEEDED else TaskStatus.FAILED}))
     return {"investigation_plan": plan.model_copy(update={"tasks": tasks}),
             "task_execution_results": results}
 
 
-async def observation(
+async def observation(state: InvestigationState, *, investigation_agent: InvestigationAgent,
+                      execution_context: KnowledgeExecutionContext, execute_phase=None) -> dict[str, object]:
+    """统一 Observation 阶段入口，分离解释逻辑与持久化机制。"""
+    plan = _business_model(InvestigationPlan, state["investigation_plan"])
+    results = [_business_model(TaskExecutionResult, row) for row in state["task_execution_results"]]
+    # 进入模型或持久化阶段前核验完整输入，不保存损坏的业务事实。
+    plan, results = validate_round_inputs(plan, results)
+    async def explain():
+        update = await _interpret_observation(
+            dict(investigation_plan=plan, task_execution_results=results),
+            investigation_agent=investigation_agent, execution_context=execution_context,
+        )
+        return update["observation"]
+    output = await (execute_phase or direct_phase)(OperationType.OBSERVATION, explain, results=results)
+    return {"observation": output}
+
+
+async def _interpret_observation(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
     execution_context: KnowledgeExecutionContext,
 ) -> dict[str, object]:

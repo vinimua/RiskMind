@@ -10,12 +10,12 @@
 | `workflow/graph.py` | 唯一拓扑定义；按可信 Runtime 分派普通/恢复节点执行逻辑 |
 | `workflow/state.py` | 两种入口共用的业务状态与可选检查点身份 |
 | `workflow/invocation.py` | 每次调用的可信 Runtime 包装，恢复控制信息不进入 State |
-| `workflow/recovery.py` | 受控恢复入口、恢复节点执行函数、逐阶段入账、运行独占和代次 fencing；不建图 |
+| `workflow/recovery.py` | 受控恢复入口、ledger phase executor、逐阶段入账、运行独占和代次 fencing；不建图或重复任务循环 |
 | `workflow/checkpoints.py` | 官方 AsyncPostgresSaver 的显式创建/初始化；JSON-only 序列化 |
 | `workflow/persistence/recovery_contracts.py` | FirstRoundSpec、RecoveryPolicy、RunClaim 与 PhaseArtifact v2 |
 | `workflow/persistence/recovery_models.py` | 运行身份、调用代次、Attempt 归属与不可变结果选择 |
 | `workflow/persistence/repository.py` | 显式读取 v1/v2 产物；保存 Query 失败事实 |
-| `workflow/nodes.py` | 抽取原 7B 查询形成/错误分类供两条入口复用 |
+| `workflow/nodes.py` | 唯一任务循环与 Observation 业务入口；原查询形成/错误分类与 7A 路径复用 |
 | `alembic/versions/20261103_0006_first_round_recovery.py` | 增量迁移、FK/唯一性、不可变与代次约束 |
 
 FirstRoundRecovery 是安全入口，不另建调度器。节点与推进仍全部由 LangGraph 执行：
@@ -32,7 +32,8 @@ replanning（当前仅结束本轮，案件 OPEN）→ END
 ```
 
 8D-1 统一为 graph.py 中同一份拓扑定义；FirstRoundRecovery 通过同一个 builder 编译图，
-不是强制所有调用共享同一个 compiled object。普通入口与恢复入口的内部执行机制仍分别保留。
+不是强制所有调用共享同一个 compiled object。8D-2 进一步统一任务循环和 Observation，
+仅保留 direct/ledger 两个阶段执行机制；首次持久化执行和恢复均经过同一 ledger executor。
 已有 8B build_investigation_graph 继续提供非恢复首轮入口；生产调用方应明确选择入口，
 不能通过非恢复入口重新调用同一已执行轮次并声称已经获得去重保证。
 

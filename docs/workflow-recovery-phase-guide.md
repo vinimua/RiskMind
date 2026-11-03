@@ -461,7 +461,8 @@ RecoveryPolicy(retry_uncertain=True)
 3. `recovery.py::_phase()`：三个短事务与外部调用的分界。
 4. `recovery.py::_selection()`：为什么不能任意挑选历史结果。
 5. `graph.py::build_investigation_graph()`：唯一拓扑如何按可信 Runtime 分派普通/恢复逻辑。
-   `recovery.py::recoverable_task_execution()`、`recoverable_observation()` 提供阶段机制，不再建图。
+   8D-2 后业务入口统一为 `nodes.py::task_execution()`、`observation()`，
+   `recovery.py::ledger_phase_executor()` 提供账本适配，不再另写任务循环或建图。
 6. `persistence/recovery_contracts.py` 与 `recovery_models.py`：运行规格、策略、归属和结果选择。
 7. `tests/workflow/test_recovery_postgres.py`：结合真实数据库测试理解中断和并发案例。
 

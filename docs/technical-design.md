@@ -408,6 +408,8 @@ Operation v1 与 Runtime Context 的耦合通过 v2 业务输入及显式兼容�
 P2-4/5/9 已解决；保留 P2-10（旧应用写入不兼容 0005）与 P2-11（8C 历史复用权限组合）。
 Stage 8C 已新增从 Accepted Plan 开始的首轮恢复入口：PG checkpoint、phase 账本复用、显式恢复策略与代次 fencing，待 review。
 Stage 8D-1 将 topology 收敛到 graph.py：prepare_plan → task_execution → observation → replanning。
+Stage 8D-2 将任务循环与 Observation 入口收敛到 nodes.py；可信 Runtime 注入 direct 或 ledger phase executor。
+持久化首次执行与恢复共用 ledger executor；缺少 Accepted Plan 时拒绝执行。旧非持久化入口仍兼容，不自动获得账本去重。
 普通/恢复模式只由每次调用的可信 Runtime 决定；共享 InvestigationState，恢复机制不再创建第二张图。
 只统一拓扑，不统一 phase 执行协议；非恢复入口仍没有账本去重保证。新恢复检查点为 v2，旧 v1 明确拒绝且需显式迁移。
 原非恢复入口不自动获得去重保证；尚未实现多轮 Replanning、通用 Capability Router/Tool Registry 或恢复 Web API。

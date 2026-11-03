@@ -140,6 +140,62 @@ def test_real_checkpointer_reopen_reuses_all_results_and_original_snapshots(data
     asyncio.run(scenario())
 
 
+def test_persisted_first_run_uses_shared_loop_and_resume_reuses_results(database, monkeypatch):
+    from risk_platform.workflow import graph as graph_module
+    from risk_platform.workflow import nodes
+    agent = Agent()
+    retrieval(monkeypatch, agent)
+    calls = []
+    async def shared(*args, **kwargs):
+        assert kwargs["execute_phase"] is not None
+        calls.append("shared-loop")
+        return await nodes.task_execution(*args, **kwargs)
+    monkeypatch.setattr(graph_module, "task_execution", shared)
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            events = list(agent.events)
+            second = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            assert first == second and agent.events == events and calls == ["shared-loop"]
+            async with sessions() as session:
+                attempts = (await session.scalars(select(AttemptRow))).all()
+                assert len(attempts) == 5 and all(row.status == "COMMITTED" for row in attempts)
+    asyncio.run(scenario())
+
+
+def test_invalid_candidate_is_committed_as_query_failure_without_search(database, monkeypatch):
+    agent = Agent()
+    def invalid(*_, **__):
+        agent.events.append("invalid-query")
+        return {"query": "q", "actor_id": "forged"}
+    agent.formulate_knowledge_query = invalid
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions, 1)
+            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            result = first["task_execution_results"][0]
+            assert result.status == "FAILED" and result.error.code == "QUERY_FORMULATION_INVALID"
+            second = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            assert second == first and agent.events == ["invalid-query"]
+            async with sessions() as session:
+                assert len((await session.scalars(select(ResultRow))).all()) == 2
+    asyncio.run(scenario())
+
+
+def test_persisted_execution_requires_accepted_plan_before_any_phase(database):
+    agent = Agent()
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            with pytest.raises(ledger.LedgerIntegrityError, match="已接受计划"):
+                await runner.ainvoke(plan_id="UNACCEPTED", context=await context(sessions))
+            assert agent.events == []
+            async with sessions() as session:
+                assert (await session.scalars(select(AttemptRow))).all() == []
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("old_node", ["load_plan", "finish_round"])
 def test_old_topology_pending_node_is_rejected_before_external_call(database, monkeypatch, old_node):
     agent = Agent()
