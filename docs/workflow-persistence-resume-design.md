@@ -1,7 +1,8 @@
 # Stage 8：持久化、恢复与幂等边界
 
 状态：Stage 8 Design APPROVED。Stage 8A 的迁移、账本契约与 PostgreSQL 仓储已 review SEALED，P1=0。
-实现与实测结果见[调查执行账本](runbooks/investigation-ledger.md)。尚未接入图节点、持久化 checkpointer 或恢复 API。
+Stage 8B Trusted Runtime / Access 亦已 review SEALED，P1=0。
+实现与实测结果见[调查执行账本](runbooks/investigation-ledger.md)。8C 首轮恢复入口已实现、待 review，见[首轮恢复](runbooks/first-round-recovery.md)。尚无恢复 Web API。
 7A/7B/7C 保持封板；本阶段先处理恢复边界，不实施多轮 Replanning。
 
 ## 1. 为什么不能只加 checkpointer
@@ -36,7 +37,7 @@ PG 账本提供执行事实与幂等依据，不成为第二个流程编排器�
 8D：真实 PG 并发、重启与崩溃窗口验收
 ```
 
-8A 已封板；8B 的 per-run context 与授权边界已实现，待 review。图不再永久绑定 Actor A；账本仍未接入自动恢复。
+8A / 8B 已封板。8C 已新增从 Accepted Plan 开始的显式恢复入口，待 review；不加入多轮 Replanning。
 
 ## 3. 身份分别负责什么
 
@@ -293,7 +294,7 @@ actor_id 或 timeout 改变会改变摘要，这是当前明确的 fail-closed �
 
 ## 18. Stage 8B：可信运行上下文与授权边界
 
-以下为 8B 的设计约束。对应实现已完成、待 review，见[运行上下文说明](runbooks/investigation-runtime.md)。
+以下为 8B 的设计约束。对应实现已 review SEALED，见[运行上下文说明](runbooks/investigation-runtime.md)。
 0004 保持原样，通过新增 0005 扩展审计和版本兼容。
 本小步先解决共享图的安全调用和账本访问前置条件；将账本接入节点重放、checkpointer 和真正恢复执行留到 8C。
 
@@ -388,3 +389,67 @@ v1 记录摘要与产物不变；兼容缺口显式报错，不伪造旧 Attempt
 
 暂不实现持久化 checkpointer、节点断点恢复、自动重试、租约接管、resume Web API、多轮 Replanning 或 Celery。
 8B 为这些后续能力提供安全边界，不宣称现有账本已经接入自动恢复。
+
+## 19. 8B Review 后的 P2 状态
+
+| 编号 | 状态 | 说明 |
+|---|---|---|
+| P2-4 | RESOLVED by 8B | compiled graph 不再永久绑定身份 |
+| P2-5 | RESOLVED within current filters | canonical 调查 model_id 与当前 scope 确定性绑定 |
+| P2-9 | RESOLVED by 8B | v2 稳定输入与 AttemptAttribution 分离，v1 不改写 |
+| P2-10 | OPEN | 0005 兼容旧数据，不兼容旧应用省略 actor attribution 的新写入 |
+| P2-11 | OPEN | 8C 需定义并测试将历史产物放回 State 的权限组合 |
+
+其他已有 P2 继续保留；本表是对前文历史问题记录的状态更新。
+P2-10 不通过放宽 trigger 解决：未来生产部署采用协调切换，或单独 review expand/contract 迁移。
+不能因 legacy 数据可读就推导旧二进制可继续写；新审计数据也不能随应用回滚丢弃。
+
+## 20. 8C 实现前必须锁定的恢复规则
+
+以下是 8C 验收约束；对应显式首轮恢复入口已实现、待 review。只从已入账 Accepted Plan 开始，案件仍 OPEN。
+
+### 20.1 历史复用的权限建议
+
+把历史 Result 或 Observation 放回 State，并继续运行下游节点，建议同时要求：
+
+```text
+当前 investigation:continue
+AND 当前 investigation:read
+AND 当前身份/调查/轮次/计划绑定正确
+AND 当前 scope/profile 能覆盖原始完整产物
+```
+
+READ-only 可以使用现有历史读取入口，不能推进图。
+CONTINUE-only 不得通过“内部恢复”旁路读出完整历史；权限不足时明确拒绝，不重新执行已提交任务来规避 READ 限制。
+检查应发生在读取 checkpoint 敏感载荷、回填 State 或交给 Agent 之前。
+thread_id 只负责定位，不能替代调查资源鉴权。
+规则和不同权限组合已有测试，P2-11 的 CONTINUE + READ 实现等待 8C review 后确认关闭。
+
+### 20.2 依据账本区分恢复路径
+
+| 账本事实 | 首轮恢复要求 |
+|---|---|
+| 已 COMMITTED | 校验身份、输入、版本与权限后复用原产物；失败/拒绝/零命中/INCONCLUSIVE 也不自动重跑 |
+| 有 STARTED | 不假定未执行，也不自动抢占；按明确协调策略处理仍活跃或失联尝试 |
+| 有 UNCERTAIN | 保留历史；只有明确策略/授权允许时登记新 Attempt，不宣称外部调用恰好一次 |
+| 已知失败、无已提交产物 | 保留失败事实，显式决定是否新建尝试，不静默覆盖 |
+| 未登记/未尝试 | 复用已接受计划的稳定任务身份，登记 Operation 与 Attempt 并提交后再调用 |
+
+存在多个历史尝试时，继续使用哪份已提交产物必须有确定性规则或明确记录，不能让 repository 自动取最新成功。
+8C 实现前需选定该规则及并发接续策略，并验证旧 worker 返回不能覆盖新事实。
+
+### 20.3 checkpoint 与 ledger 不能互相冒充
+
+先可靠提交业务产物，再让节点返回 State 更新。
+业务产物已提交但 checkpoint 缺失时，重入节点复用原身份、原 payload 和原路由快照。
+checkpoint 宣称完成但 ledger 缺失或损坏时，完整性失败，不由模型补写结果。
+持久化 checkpoint 也可能包含 Context/Observation，读取时必须受与账本相同的当前权限边界保护。
+
+### 20.4 最小验收场景
+
+T0 提交后、T1 崩溃：重入不重复调用 T0；只按策略处理 T1。
+Query、Execution、Observation 分别覆盖“已提交但 checkpoint 未推进”的窗口。
+外部完成而结果未落库必须保留不确定历史，不能自动标成未执行。
+重新认证、撤权、只读、仅继续、范围变窄、跨调查及重复恢复请求均需验证。
+新 Attempt 归因当前 actor；复用产物保持旧 execution_id/observation_id/snapshot。
+测试通过才能宣称首轮恢复实现，不以已配置 checkpointer 代替崩溃恢复验收。

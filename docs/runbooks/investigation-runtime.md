@@ -1,6 +1,6 @@
 # Stage 8B：每次运行的可信上下文与账本访问
 
-状态：已实现，待 review。未接入 checkpointer、节点重放、自动重试或恢复 API。
+状态：Stage 8B SEALED，review P1=0。未接入 checkpointer、节点重放、自动重试或恢复 API。
 8A 的 0004 迁移与原 v1 契约不改写；新增 0005 做向前兼容演进。
 
 ## 1. 代码组成
@@ -172,4 +172,18 @@ PostgreSQL 集成在独立 UUID schema 中实际执行；跳过项为其他未�
 
 8B 不实现自动恢复、checkpointer、自动重试、租约接管、多轮 Replanning、Celery 或 Web API。
 只构建可信上下文/权限与审计边界，后续 8C 才把它们接到真正的恢复执行路径。
-已有 P2-4/5/9 对应的边界已在当前入口实现，等待 review；其他 P2 保留，不据此宣称支持当前 scope 无法表达的隔离。
+P2-4/5/9 已 review RESOLVED；model/scope 绑定仅覆盖当前过滤模型，不代表支持 tenant/time-window。
+其他 P2 保留。下一步只进入首轮崩溃恢复设计与实现，不顺带做多轮 Replanning。
+
+## 10. Review 保留项
+
+P2-10（OPEN）：0005 兼容旧数据，不兼容旧 8A 应用的新 Attempt 写入。
+数据库升级后，旧 replica 不带 attribution 的 INSERT 会失败。这不是 rolling-deploy 安全迁移。
+将来部署必须协调暂停旧写入/排空旧实例、升级数据库和新应用后再恢复写入，
+或者另行设计 expand/contract；本轮不放宽审计 trigger，也不改写 0005。
+存在新审计数据后不能把直接 downgrade 当作应用回滚方案。
+
+P2-11（OPEN，8C 前置）：把历史 Result 重新放回 Workflow State 所需的权限组合尚未实现。
+8C 的建议规则为 CONTINUE + READ，并执行当前 scope/profile 校验；只有 CONTINUE 时不能静默读取历史 payload。
+8C 已单独实现 CONTINUE + READ 的首轮恢复入口，待 review；8B 原始入口本身仍不是恢复接口。
+具体支持范围见[首轮崩溃恢复](first-round-recovery.md)。

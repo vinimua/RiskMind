@@ -129,5 +129,6 @@ class ResultRow(PayloadRow, Base):
         ForeignKeyConstraint(["attempt_id", "result_id"], ["investigation_attempts.attempt_id", "investigation_attempts.result_id"],
                              name="fk_ledger_result_committed_attempt", use_alter=True, deferrable=True, initially="DEFERRED"),
         UniqueConstraint("result_id", "attempt_id", name="uq_ledger_result_attempt"),
-        CheckConstraint("schema_version = 1 AND NOT (execution_id IS NOT NULL AND observation_id IS NOT NULL)", name="ck_ledger_result"),
+        UniqueConstraint("result_id", "operation_key", name="uq_ledger_result_operation"),
+        CheckConstraint("schema_version IN (1,2) AND NOT (execution_id IS NOT NULL AND observation_id IS NOT NULL)", name="ck_ledger_result"),
     )

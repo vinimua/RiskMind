@@ -16,6 +16,7 @@ from .contracts import (
 )
 from .models import AcceptedPlanRow, AttemptRow, InvestigationRow, OperationRow, PlanTaskRow, ResultRow, RoundRow
 from .business_inputs import AttemptAttribution, BusinessOperationInput, business_projection
+from .recovery_contracts import PhaseArtifact
 
 
 class LedgerConflictError(ValueError):
@@ -47,6 +48,12 @@ def read_operation(row) -> OperationInput | BusinessOperationInput:
     if row.schema_version not in (1, 2):
         raise LedgerIntegrityError("未知操作契约版本")
     return _read(row, OperationInput if row.schema_version == 1 else BusinessOperationInput)
+
+
+def read_artifact(row) -> CommittedArtifact | PhaseArtifact:
+    if row.schema_version not in (1, 2):
+        raise LedgerIntegrityError("未知产物契约版本")
+    return _read(row, CommittedArtifact if row.schema_version == 1 else PhaseArtifact)
 
 
 async def _insert(session, row_type, identity, value, **columns):
@@ -182,7 +189,7 @@ async def _observation_results(session, operation):
                                    .where(ResultRow.execution_id == execution_id, OperationRow.plan_id == operation.plan_id))
         if row is None:
             raise LedgerIntegrityError("解释引用的执行结果未提交或不属于本计划")
-        artifact = _read(row, CommittedArtifact)
+        artifact = read_artifact(row)
         results.append(artifact.execution)
     plan_row = await session.get(AcceptedPlanRow, operation.plan_id)
     plan = _read(plan_row, AcceptedPlan).plan
@@ -195,7 +202,11 @@ async def _observation_results(session, operation):
 async def _validate_artifact(session, operation, artifact):
     if operation.operation_type == OperationType.QUERY_FORMULATION:
         if artifact.query_request is None:
-            raise LedgerIntegrityError("查询形成操作必须提交候选请求")
+            failed = artifact.execution
+            if (not isinstance(artifact, PhaseArtifact) or failed is None or failed.task_id != operation.task_id
+                    or failed.capability != CapabilityType.KNOWLEDGE_RETRIEVAL or failed.status != "FAILED"
+                    or failed.error is None or not failed.error.code.startswith("QUERY_FORMULATION_")):
+                raise LedgerIntegrityError("查询形成必须提交候选请求或 v2 的查询失败事实")
     elif operation.operation_type == OperationType.KNOWLEDGE_EXECUTION:
         result = artifact.execution
         if result is None or result.task_id != operation.task_id or result.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
@@ -252,7 +263,7 @@ async def commit_result(session: AsyncSession, attempt_id: str, result_id: str, 
         row = await session.get(ResultRow, attempt.result_id)
         if row is None:
             raise LedgerIntegrityError("已提交尝试缺少产物")
-        _read(row, CommittedArtifact)
+        read_artifact(row)
         if row.result_id != result_id or row.payload != canonical_json(artifact):
             raise LedgerConflictError("已提交结果不能替换身份或载荷")
         return row
@@ -288,5 +299,5 @@ async def inspect_operation(session: AsyncSession, value: OperationInput | Busin
         result = await session.get(ResultRow, attempt.result_id) if attempt.result_id else None
         if (attempt.status == AttemptStatus.COMMITTED) != (result is not None):
             raise LedgerIntegrityError("尝试提交状态与产物不一致")
-        history.append((attempt, _read(result, CommittedArtifact) if result else None))
+        history.append((attempt, read_artifact(result) if result else None))
     return tuple(history)

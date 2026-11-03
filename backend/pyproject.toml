@@ -21,6 +21,7 @@ database = ["sqlalchemy", "alembic", "psycopg[binary]"]
 worker = ["celery[redis]"]
 modelops = ["mlflow"]
 knowledge = ["pymilvus==2.6.17"]
+recovery = ["langgraph-checkpoint-postgres>=2.0.25,<4", "psycopg[binary]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

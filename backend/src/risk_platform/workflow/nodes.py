@@ -35,6 +35,41 @@ def initial_planning(
             "round_complete": False, "investigation_status": "OPEN"}
 
 
+async def formulate_task_query(task, planning_input, *, goal, investigation_agent, trusted):
+    """复用 7B 查询形成与错误分类；8C 将其产物单独入账。"""
+    try:
+        if task.capability == CapabilityType.KNOWLEDGE_RETRIEVAL:
+            # 现有 Agent 使用同步 SDK，移到线程避免阻塞事件循环；不把 objective 当作 query。
+            async with asyncio.timeout(trusted.timeout_seconds):
+                candidate = await asyncio.to_thread(
+                    investigation_agent.formulate_knowledge_query,
+                    task.model_copy(deep=True), planning_input.model_copy(deep=True),
+                    goal=goal, max_top_k=trusted.max_top_k,
+                )
+        else:
+            # 不运行其他能力，也不擅自把它改成知识任务；交给 7A 明确拒绝。
+            candidate = {}
+    except (TimeoutError, APITimeoutError):
+        error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_TIMEOUT",
+                               message="知识查询构造超时，未调用检索工具", retryable=True)
+    except (ValidationError, ValueError):
+        error = ExecutionError(category=ErrorCategory.VALIDATION, code="QUERY_FORMULATION_INVALID",
+                               message="知识查询构造结果非法，未调用检索工具", retryable=False)
+    except APIConnectionError:
+        error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_UNAVAILABLE",
+                               message="知识查询构造服务不可用，未调用检索工具", retryable=True)
+    except APIStatusError as failure:
+        error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_API_FAILURE",
+                               message="知识查询构造服务请求失败，未调用检索工具",
+                               retryable=failure.status_code == 429 or failure.status_code >= 500)
+    except Exception:
+        error = ExecutionError(category=ErrorCategory.INTERNAL, code="QUERY_FORMULATION_FAILED",
+                               message="知识查询构造未能完成，未调用检索工具", retryable=False)
+    else:
+        error = None
+    return (candidate if error is None else None), error
+
+
 async def task_execution(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
     execution_context: KnowledgeExecutionContext,
@@ -60,36 +95,9 @@ async def task_execution(
         if before_task is not None:
             before_task()  # 8B 按任务重新检查当前案件继续权限，失败不进入 Query Formulation。
         started = datetime.now(timezone.utc)
-        try:
-            if task.capability == CapabilityType.KNOWLEDGE_RETRIEVAL:
-                # 现有 Agent 使用同步 SDK，移到线程避免阻塞事件循环；不把 objective 当作 query。
-                async with asyncio.timeout(trusted.timeout_seconds):
-                    candidate = await asyncio.to_thread(
-                        investigation_agent.formulate_knowledge_query,
-                        task.model_copy(deep=True), planning_input.model_copy(deep=True),
-                        goal=plan.goal, max_top_k=trusted.max_top_k,
-                    )
-            else:
-                # 不运行其他能力，也不擅自把它改成知识任务；交给 7A 明确拒绝。
-                candidate = {}
-        except (TimeoutError, APITimeoutError):
-            error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_TIMEOUT",
-                                   message="知识查询构造超时，未调用检索工具", retryable=True)
-        except (ValidationError, ValueError):
-            error = ExecutionError(category=ErrorCategory.VALIDATION, code="QUERY_FORMULATION_INVALID",
-                                   message="知识查询构造结果非法，未调用检索工具", retryable=False)
-        except APIConnectionError:
-            error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_UNAVAILABLE",
-                                   message="知识查询构造服务不可用，未调用检索工具", retryable=True)
-        except APIStatusError as failure:
-            error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_API_FAILURE",
-                                   message="知识查询构造服务请求失败，未调用检索工具",
-                                   retryable=failure.status_code == 429 or failure.status_code >= 500)
-        except Exception:
-            error = ExecutionError(category=ErrorCategory.INTERNAL, code="QUERY_FORMULATION_FAILED",
-                                   message="知识查询构造未能完成，未调用检索工具", retryable=False)
-        else:
-            error = None
+        candidate, error = await formulate_task_query(
+            task, planning_input, goal=plan.goal, investigation_agent=investigation_agent, trusted=trusted,
+        )
         if error is not None:
             # 模型失败也要有系统生成的尝试记录，但不伪造一次已发生的 RAG 调用。
             result = TaskExecutionResult(

@@ -403,9 +403,11 @@ FAILED/REJECTED 映射任务 FAILED，具体原因保留在结构化结果中。
 可信 context/authorize 由可信应用按次通过 ainvoke(context=...) 注入，不放入模型可写 State 或永久绑定在图上。
 Stage 7C 已接入结构化 Observation 与确定性执行/来源引用校验。
 Stage 8A 已实现独立的 PostgreSQL 调查执行账本：稳定身份、canonical digest、不可变计划/结果与尝试历史。
-8A 已 review SEALED，P1=0。8B 已实现 per-run 身份/读与继续分权、canonical 调查 scope 绑定及尝试级 actor 审计，待 review。
+8A / 8B 已 review SEALED，P1=0。8B 实现 per-run 身份/读与继续分权、canonical 调查 scope 绑定及尝试级 actor 审计。
 Operation v1 与 Runtime Context 的耦合通过 v2 业务输入及显式兼容投影处理，原摘要与历史不改写。
-账本尚未接入图节点；尚未实现真实 Replanning、通用 Capability Router/Tool Registry 或工作流持久化恢复。
+P2-4/5/9 已解决；保留 P2-10（旧应用写入不兼容 0005）与 P2-11（8C 历史复用权限组合）。
+Stage 8C 已新增从 Accepted Plan 开始的首轮恢复入口：PG checkpoint、phase 账本复用、显式恢复策略与代次 fencing，待 review。
+原非恢复入口不自动获得去重保证；尚未实现多轮 Replanning、通用 Capability Router/Tool Registry 或恢复 Web API。
 以下工具注册流程是后续目标边界，不能视为现阶段已经全部实现。
 
 后续按小步推进：
@@ -416,6 +418,7 @@ Stage 8 持久化/恢复/幂等；Stage 9 多轮重规划。7B 前的语义修�
 [Stage 7B 首轮执行](runbooks/first-round-knowledge-execution.md)。
 Stage 8A 的 schema、事务与验收见[调查执行账本](runbooks/investigation-ledger.md)。
 Stage 8B 的调用、权限和兼容边界见[每次运行的可信上下文](runbooks/investigation-runtime.md)。
+Stage 8C 的支持范围、事务与故障验收见[首轮崩溃恢复](runbooks/first-round-recovery.md)。
 
 Task Execution 通过 Tool Registry 执行。
 
