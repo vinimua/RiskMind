@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from risk_platform.db.database import Base, get_database_url
 from risk_platform.knowledge import models  # noqa: F401
+from risk_platform.workflow.persistence import models as ledger_models  # noqa: F401
 
 
 config = context.config

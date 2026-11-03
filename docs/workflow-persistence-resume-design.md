@@ -1,6 +1,7 @@
 # Stage 8：持久化、恢复与幂等边界
 
-状态：待 review 的设计，尚未实现迁移、执行账本、持久化 checkpointer 或恢复 API。
+状态：Stage 8 Design APPROVED（2026-11-03）。8A 的迁移、账本契约与 PostgreSQL 仓储已实现，待 review。
+实现与实测结果见[调查执行账本](runbooks/investigation-ledger.md)。尚未接入图节点、持久化 checkpointer 或恢复 API。
 7A/7B/7C 保持封板；本阶段先处理恢复边界，不实施多轮 Replanning。
 
 ## 1. 为什么不能只加 checkpointer
@@ -177,3 +178,111 @@ Query Formulation 与 Observation 自然语言语义质量仍 INCONCLUSIVE。持
 - [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)：节点执行与 runtime context 机制。
 
 框架支持这些能力不等于 RiskMind 已配置；业务幂等和权限仍需应用实现。
+
+## 16. Review 确认的 8A 实现契约
+
+本节是 8A 的实现与验收约束；账本已独立实现，图恢复仍未接入。
+8A 只实现稳定身份、canonical input digest、持久化契约、PostgreSQL 仓储及相应测试。
+不接恢复执行，不改 graph.py，不引入 Celery、API、DAG Scheduler、Replanning、Policy Gate、完整 Outbox 或通用 Tool Registry。
+
+### 16.1 最小持久化关系
+
+```text
+Investigation → Round → Accepted Plan → Operation → Attempt → Committed Result
+                       本轮 Observation 同样保留稳定身份与不可变载荷
+```
+
+计划包含正式任务身份，接受后不可原地改写；恢复不能重新规划生成替代 task_id。
+数据库需落实 FK、operation 唯一性、载荷契约版本及已提交事实的不可变约束。
+Observation 仍使用 7C 的历史知识边界，不因被持久化而成为 Evidence。
+
+### 16.2 Operation 是逻辑幂等单位
+
+operation_key 标识某调查、某轮、某任务、某阶段的逻辑工作；attempt_id 标识一次尝试；
+execution_id 标识 7A 产出的执行结果。不得以 execution_id 判断是否为同一逻辑工作。
+
+| 已有记录与本次输入 | 仓储语义 |
+|---|---|
+| 无 operation | 从未登记尝试，可登记新的逻辑工作 |
+| 同 key、同 digest、无已提交结果 | 返回已有尝试事实，不自动解释成可重试或已失败 |
+| 同 key、同 digest、有已提交结果 | 可定位并复用原结果；实际读取/恢复鉴权由后续入口处理 |
+| 同 key、不同 digest | CONFLICT，不能覆盖，也不能静默新建同名工作 |
+
+同一逻辑工作若要显式重试，必须保留先前 attempt/result；重试策略及选择哪个结果用于继续调查不由 8A 仓储自动决定。
+
+### 16.3 Attempt 正式状态
+
+| 状态 | 含义 |
+|---|---|
+| STARTED | 已登记尝试，尚未可靠提交终态；不能据此证明外部请求已发出或未发出 |
+| COMMITTED | 已将本次产物可靠写入业务账本 |
+| FAILED | 已知本次尝试失败，保留确定的失败事实 |
+| UNCERTAIN | 无法确认外部调用是否完成或产生效果，例如调用完成后、结果提交前进程死亡 |
+
+STARTED 可以结算为 COMMITTED、FAILED 或 UNCERTAIN；终态不能原地改成另一段历史。
+8A 提供记录这些事实的契约，不自动扫描并把所有 STARTED 判定为 UNCERTAIN，更不自动重试。
+后续执行协调必须先排除仍活跃的 worker，再记录不确定尝试，防止把正在运行的调用误判为失联。
+
+特别区分两种状态：
+
+```text
+Attempt.COMMITTED
+    = 结果已可靠保存
+
+TaskExecutionResult.status = FAILED / REJECTED
+    = 被保存的业务执行结果失败 / 被拒绝
+```
+
+二者可以同时成立。7A 已正常返回的失败、拒绝或零命中结果，以及 7C 的 INCONCLUSIVE，
+都可以作为已提交产物保存，不能仅因其业务内容不成功就宣称账本未提交。
+
+### 16.4 已提交产物不可变
+
+已提交的 execution_id、observation_id、payload、原始路由快照和关联身份不能被后续尝试覆盖。
+相同提交重放只能核对后返回原事实；不同身份或不同载荷必须冲突。
+失败和拒绝记录也不因后续成功而消失。
+
+数据库 invariant 与仓储事务需要共同验证这一点，不能只依赖调用方约定。
+数据库高权限管理员绕过约束的防护不等于本阶段提供密码学防篡改能力。
+
+### 16.5 Canonical input digest
+
+输入摘要必须由有版本的契约载荷生成：先转成 JSON 值，再固定对象键顺序、采用固定分隔格式、
+以 UTF-8 编码，最后计算 SHA-256。禁止使用 sha256(str(dict))。
+
+```text
+有版本的输入契约
+    → canonical JSON（对象键排序，列表顺序保留，拒绝非有限数值）
+    → UTF-8 bytes
+    → SHA-256
+    → input_digest
+```
+
+对象键插入顺序不影响摘要；列表顺序、字符串正文和实际业务值变化仍影响摘要。
+不为得到相同摘要而擅自 strip、重排列表或规范化正文。
+
+各阶段输入按其实际已知内容建模，覆盖调查/轮次/计划/任务身份、operation 类型、schema_version，
+以及该阶段相关的请求、可信 scope/profile、模型和 prompt 版本。
+candidate_request 与 effective_request 必须明确区分；尚未由 7A 得到的 effective_request 不能虚构成已知输入。
+保存 actor 供审计关联，但凭据、连接对象和 authorize 函数不得进入序列化载荷。
+
+### 16.6 最小验收矩阵
+
+1. 同 key 同摘要重复登记不会产生第二份逻辑工作；不同摘要冲突。
+2. 对象键顺序变化摘要不变；业务值、列表顺序或契约版本变化摘要改变。
+3. STARTED、FAILED、UNCERTAIN 与 COMMITTED 可明确区分，尝试历史不会丢失。
+4. 已提交结果重放保留原身份与路由快照；改写 execution_id、payload 或 Observation 被拒绝。
+5. FAILED、REJECTED、零命中、INCONCLUSIVE 可以作为不可变历史产物保存。
+6. 跨调查/轮次/计划/任务错误关联由契约、仓储与 FK 拒绝。
+7. 真实 PostgreSQL 验证迁移、事务回滚、唯一约束和并发重复提交。
+
+这些测试证明账本能区分事实；不宣称已经完成 LangGraph 重启恢复或外部调用 exactly-once。
+
+## 17. Review 状态与 P2-8
+
+Stage 7A / 7B / 7C 继续 SEALED；Stage 8 Design APPROVED，未发现需要推翻路线的 P1。
+原有七项 P2 保留。
+
+P2-8：未来是否使用 LangGraph node 内 task 作为更细粒度 checkpoint 的实现选项，留到 8C 决定。
+即使采用该机制，也不能替代包含身份、尝试历史、输入摘要、载荷版本、路由快照及审计关联的业务执行账本。
+8A 不因此修改既有图结构。

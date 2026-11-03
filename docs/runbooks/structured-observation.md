@@ -161,5 +161,7 @@ Query Formulation 与本次 Observation 的模型语义质量均仍需专项验�
 新增 P2-7：ObservationSource.source 指 supporting Child，引句可能只位于 Parent Context，
 后续 citation API/UI 不能误认为 quote 一定位于该 Child。
 
-下一阶段先 review [持久化、恢复与幂等边界](../workflow-persistence-resume-design.md)，
-不继续扩 Observation，也不先实现第二轮 Replanning。
+下一阶段的[持久化、恢复与幂等边界设计](../workflow-persistence-resume-design.md)已通过 review。
+下一步为 8A：稳定身份、canonical input digest、持久化契约与 PostgreSQL 仓储。
+8A 账本已独立实现，见[调查执行账本](investigation-ledger.md)，当前待 review。
+尚未接恢复执行，不继续扩 Observation，也不先实现第二轮 Replanning。
