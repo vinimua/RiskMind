@@ -22,6 +22,8 @@
 ## 2. 图调用方式
 
 ```python
+from risk_platform.workflow.invocation import InvestigationInvocation
+
 graph = build_investigation_graph(investigation_agent)  # 可以复用结构与安全共享的依赖
 
 async with sessions() as session:
@@ -37,11 +39,13 @@ async with sessions() as session:
 
 result = await graph.ainvoke(
     {"planning_input": runtime_context.investigation.planning_input.model_copy(deep=True)},
-    context=runtime_context,
+    context=InvestigationInvocation(runtime=runtime_context),
 )
 ```
 
 execution 的 actor/scope/profile/预算由可信调用方提供，不从 Agent 返回值构造。
+8D-3 起图调用必须显式包装 InvestigationInvocation，不再兼容裸 Runtime 自动包装。
+这里是非持久化入口，不因上下文统一而自动获得账本去重；持久化首次执行/恢复使用 FirstRoundRecovery。
 authorize_resource 接收 `(actor_id, action, InvestigationResource)`；authorize_knowledge 继续使用 7A 的签名。
 两者都必须显式返回 True，不能用 1、非空对象或异常代替授权。
 

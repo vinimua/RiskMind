@@ -35,11 +35,14 @@ round_complete=True，investigation_status=OPEN
 ## 可信注入与调用方式
 
 ```python
+from risk_platform.workflow.invocation import InvestigationInvocation
+
 graph = build_investigation_graph(
     investigation_agent,
     # 可注入 session_factory、embedding_client、milvus_client
 )
-result = await graph.ainvoke({"planning_input": planning_input}, context=runtime_context)
+result = await graph.ainvoke({"planning_input": planning_input},
+                            context=InvestigationInvocation(runtime=runtime_context))
 ```
 
 8B 已将原构图绑定身份改成每次调用提供 runtime_context，不设置默认身份，不从 State 读取模型声明的权限。

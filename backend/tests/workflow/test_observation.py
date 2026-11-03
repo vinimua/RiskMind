@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution.contracts import (
     ExecutionError, KnowledgeExecutionContext, KnowledgeExecutionPayload, KnowledgeSearchToolRequest, TaskExecutionResult,
 )
@@ -196,9 +197,9 @@ def test_graph_observation_does_not_close_case_or_change_execution_results(monke
                 raise ValueError("private")
             return KnowledgeObservationDraft.model_validate(draft(results))
     graph = build_investigation_graph(Agent())
-    output = asyncio.run(graph.ainvoke({"planning_input": state["planning_input"]}, context=make_runtime(
+    output = asyncio.run(graph.ainvoke({"planning_input": state["planning_input"]}, context=InvestigationInvocation(runtime=make_runtime(
         state["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD),
-        allow_unscoped=True)))
+        allow_unscoped=True))))
     assert output["round_complete"] is True and output["investigation_status"] == "OPEN"
     assert output["task_execution_results"] == results
     assert output["observation"].status == ("INCONCLUSIVE" if bad_model else "SUCCEEDED")

@@ -4,6 +4,7 @@
 
 后续状态：8D-1 已 review SEALED；本文保留该阶段的结构说明。
 8D-2 已进一步删除独立恢复任务循环，当前实现见 [阶段执行收敛](workflow-phase-execution-convergence.md)。
+8D-3 又删除裸 Runtime 自动包装；下文为 8D-1 阶段记录，当前入口见 [统一调用契约](workflow-invocation-convergence.md)。
 
 ## 1. 唯一拓扑
 

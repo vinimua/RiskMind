@@ -88,8 +88,8 @@ def test_round_ends_but_investigation_remains_open() -> None:
     plan = _plan()
     graph = _graph(FakeInvestigationAgent(plan))
 
-    result = asyncio.run(graph.ainvoke({"planning_input": planning_input}, context=make_runtime(
-        planning_input, actor="operator", authorize_knowledge=lambda *_: False)))
+    result = asyncio.run(graph.ainvoke({"planning_input": planning_input}, context=InvestigationInvocation(runtime=make_runtime(
+        planning_input, actor="operator", authorize_knowledge=lambda *_: False))))
 
     assert result["planning_input"] == planning_input
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 from risk_platform.knowledge.context_resolution import ContextResolutionResult
 from risk_platform.knowledge.retrieval import DenseChildRetrievalResult
@@ -87,8 +88,8 @@ def test_one_compiled_graph_handles_two_actors_without_identity_or_scope_leak(mo
         return True
     async def call(actor, model):
         source = planning(model)
-        return await graph.ainvoke({"planning_input": source}, context=make_runtime(source, actor=actor,
-            investigation_id="I-"+actor, round_id="R-"+actor, authorize_knowledge=auth))
+        return await graph.ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=make_runtime(source, actor=actor,
+            investigation_id="I-"+actor, round_id="R-"+actor, authorize_knowledge=auth)))
     async def run():
         return await asyncio.gather(call("A", "M1"), call("B", "M2")) if concurrent else [await call("A", "M1"), await call("B", "M2")]
     results = asyncio.run(run())
@@ -115,7 +116,7 @@ def test_invalid_runtime_never_calls_planning_or_query_model(bad):
     else:
         context = make_runtime(source, authorize_resource=lambda _, action, __: action == "investigation:read")
     with pytest.raises(InvestigationAccessError):
-        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=context))
+        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=context)))
 
 
 def test_revocation_after_planning_stops_before_query_formulation():
@@ -130,4 +131,4 @@ def test_revocation_after_planning_stops_before_query_formulation():
     source = planning()
     context = make_runtime(source, authorize_resource=lambda *_: permission["allowed"])
     with pytest.raises(InvestigationAccessError):
-        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=context))
+        asyncio.run(build_investigation_graph(Agent()).ainvoke({"planning_input": source}, context=InvestigationInvocation(runtime=context)))

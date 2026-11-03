@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution import knowledge
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 from risk_platform.knowledge.context_resolution import ContextResolutionResult, ContextResolutionIntegrityError
@@ -109,7 +110,7 @@ def test_full_graph_success_remains_open_and_resets_old_results(monkeypatch):
     graph = build_investigation_graph(Agent(original, events))
     result = asyncio.run(graph.ainvoke({"planning_input": original["planning_input"],
                                       "round_complete": True, "task_execution_results": []},
-                                      context=make_runtime(original["planning_input"], context())))
+                                      context=InvestigationInvocation(runtime=make_runtime(original["planning_input"], context()))))
     assert result["round_complete"] is True and result["investigation_status"] == "OPEN"
     assert len(result["task_execution_results"]) == 2
     assert result["observation"].status == "INCONCLUSIVE" and "hypotheses" not in result

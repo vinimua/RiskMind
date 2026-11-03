@@ -14,6 +14,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.execution import knowledge
 from risk_platform.execution.contracts import KnowledgeExecutionContext, KnowledgeSearchToolRequest
 from risk_platform.knowledge.contracts import KnowledgeHit, KnowledgeSourceRef
@@ -124,7 +125,7 @@ def test_real_checkpointer_reopen_reuses_all_results_and_original_snapshots(data
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
-            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert first["round_complete"] and first["investigation_status"] == "OPEN"
             assert [row.task_id for row in first["task_execution_results"]] == ["T0", "T1"]
             assert first["observation"].status == "SUCCEEDED"
@@ -132,7 +133,7 @@ def test_real_checkpointer_reopen_reuses_all_results_and_original_snapshots(data
         route["collection"] = "physical-v2"
         # 独立新 engine / saver / compiled graph，读取相同 PG checkpoint。
         async with resources(database, agent) as (sessions, saver, runner):
-            second = await runner.ainvoke(plan_id="P", context=await context(sessions, "B", timeout=60))
+            second = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B", timeout=60)))
             assert second == first and agent.events == count
             async with sessions() as session:
                 assert len(list(await session.scalars(select(ResultRow)))) == 5
@@ -154,13 +155,45 @@ def test_persisted_first_run_uses_shared_loop_and_resume_reuses_results(database
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
-            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             events = list(agent.events)
-            second = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            second = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B")))
             assert first == second and agent.events == events and calls == ["shared-loop"]
             async with sessions() as session:
                 attempts = (await session.scalars(select(AttemptRow))).all()
                 assert len(attempts) == 5 and all(row.status == "COMMITTED" for row in attempts)
+    asyncio.run(scenario())
+
+
+def test_fresh_and_interrupted_resume_use_same_explicit_invocation_contract(database, monkeypatch):
+    agent = Agent()
+    retrieval(monkeypatch, agent)
+    original, interrupted = recovery._phase, {"done": False}
+    async def interrupt(*args):
+        artifact = await original(*args)
+        if not interrupted["done"]:
+            interrupted["done"] = True
+            raise ProcessLost("已提交 Query，检查点节点尚未完成")
+        return artifact
+    monkeypatch.setattr(recovery, "_phase", interrupt)
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions)
+            public = InvestigationInvocation(runtime=await context(sessions))
+            calls = []
+            invoke = runner._graph.ainvoke
+            async def capture(initial, *args, context, **kwargs):
+                assert isinstance(context, InvestigationInvocation)
+                assert context.recovery is not None and context.runtime is public.runtime
+                calls.append(initial)
+                return await invoke(initial, *args, context=context, **kwargs)
+            monkeypatch.setattr(runner._graph, "ainvoke", capture)
+            with pytest.raises(ProcessLost):
+                await runner.ainvoke(plan_id="P", context=public)
+            output = await runner.ainvoke(plan_id="P", context=public)
+            assert calls[0]["checkpoint_schema_version"] == 2 and calls[1] is None
+            assert public.recovery is None  # 内部 claim 不回填到调用方上下文。
+            assert output["round_complete"] and agent.events.count("query:T0") == 1
     asyncio.run(scenario())
 
 
@@ -173,10 +206,10 @@ def test_invalid_candidate_is_committed_as_query_failure_without_search(database
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
-            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             result = first["task_execution_results"][0]
             assert result.status == "FAILED" and result.error.code == "QUERY_FORMULATION_INVALID"
-            second = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            second = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B")))
             assert second == first and agent.events == ["invalid-query"]
             async with sessions() as session:
                 assert len((await session.scalars(select(ResultRow))).all()) == 2
@@ -189,7 +222,7 @@ def test_persisted_execution_requires_accepted_plan_before_any_phase(database):
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
             with pytest.raises(ledger.LedgerIntegrityError, match="已接受计划"):
-                await runner.ainvoke(plan_id="UNACCEPTED", context=await context(sessions))
+                await runner.ainvoke(plan_id="UNACCEPTED", context=InvestigationInvocation(runtime=await context(sessions)))
             assert agent.events == []
             async with sessions() as session:
                 assert (await session.scalars(select(AttemptRow))).all() == []
@@ -206,7 +239,7 @@ def test_old_topology_pending_node_is_rejected_before_external_call(database, mo
                 return SimpleNamespace(values={}, next=(old_node,))
             monkeypatch.setattr(runner._graph, "aget_state", old_checkpoint)
             with pytest.raises(ledger.LedgerIntegrityError, match="旧拓扑"):
-                await runner.ainvoke(plan_id="P", context=await context(sessions))
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert agent.events == []
             async with sessions() as session:
                 assert (await session.scalars(select(AttemptRow))).all() == []
@@ -229,7 +262,7 @@ def test_recovery_uses_shared_replanning_and_topology(database, monkeypatch):
             assert set(runner._graph.get_graph().nodes) == {
                 "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
             }
-            result = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            result = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert result["round_complete"] and result["investigation_status"] == "OPEN"
             assert len(calls) == 1 and calls[0]["status"] == "SUCCEEDED"
     asyncio.run(scenario())
@@ -241,14 +274,14 @@ def test_old_checkpoint_version_is_rejected_without_reexecuting(database, monkey
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
-            await runner.ainvoke(plan_id="P", context=await context(sessions))
+            await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             events = list(agent.events)
             async with sessions() as session:
                 run = (await session.scalars(select(InvestigationRunRow))).one()
             await runner._graph.aupdate_state({"configurable": {"thread_id": run.run_id}},
                                              {"checkpoint_schema_version": 1})
             with pytest.raises(ledger.LedgerIntegrityError, match="版本不兼容"):
-                await runner.ainvoke(plan_id="P", context=await context(sessions))
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert agent.events == events
     asyncio.run(scenario())
 
@@ -270,9 +303,9 @@ def test_crash_after_phase_commit_before_node_checkpoint_reuses_exact_artifact(d
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
             with pytest.raises(ProcessLost):
-                await runner.ainvoke(plan_id="P", context=await context(sessions))
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
         async with resources(database, agent) as (sessions, saver, runner):
-            output = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            output = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B")))
             assert output["observation"].status == "SUCCEEDED"
             assert agent.events.count("query:T0") == agent.events.count("query:T1") == 1
             assert agent.events.count("search:T0") == agent.events.count("search:T1") == 1
@@ -287,12 +320,12 @@ def test_query_failure_is_committed_reused_and_never_becomes_empty_success(datab
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
-            first = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert first["task_execution_results"][0].status == "FAILED"
             assert first["task_execution_results"][0].error.code == "QUERY_FORMULATION_INVALID"
             assert first["observation"].status == "INCONCLUSIVE"
         async with resources(database, agent) as (sessions, saver, runner):
-            second = await runner.ainvoke(plan_id="P", context=await context(sessions))
+            second = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert second == first and agent.events == ["query:T0"]
     asyncio.run(scenario())
 
@@ -313,18 +346,18 @@ def test_t0_reused_t1_uncommitted_becomes_uncertain_and_requires_explicit_policy
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
             with pytest.raises(ProcessLost):
-                await runner.ainvoke(plan_id="P", context=await context(sessions))
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
         before = list(agent.events)
         async with resources(database, agent) as (sessions, saver, runner):
             b = await context(sessions, "B")
             with pytest.raises(recovery.RecoveryBlockedError, match="不确定"):
-                await runner.ainvoke(plan_id="P", context=b)
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=b))
             assert agent.events == before
             async with sessions() as session:
                 uncertain = list(await session.scalars(select(AttemptRow).where(AttemptRow.status == "UNCERTAIN")))
                 assert len(uncertain) == 1 and uncertain[0].actor_id == "A"
             route["collection"] = "physical-v2"
-            output = await runner.ainvoke(plan_id="P", context=b, policy=RecoveryPolicy(retry_uncertain=True))
+            output = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=b), policy=RecoveryPolicy(retry_uncertain=True))
             assert [row.payload.retrieved.snapshot.collection for row in output["task_execution_results"]] == ["physical-v1", "physical-v2"]
             assert agent.events.count("query:T0") == agent.events.count("query:T1") == agent.events.count("search:T0") == 1
             assert agent.events.count("search:T1") == 2
@@ -349,7 +382,7 @@ def test_resume_checks_both_permissions_before_reading_checkpoint(database, monk
                 pytest.fail("权限不足不应先读取 checkpoint")
             monkeypatch.setattr(runner._graph, "aget_state", forbidden)
             with pytest.raises(InvestigationAccessError):
-                await runner.ainvoke(plan_id="P", context=denied)
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=denied))
             assert not agent.events
     asyncio.run(scenario())
 
@@ -368,11 +401,11 @@ def test_duplicate_active_resume_is_rejected_without_second_external_call(databa
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
             a, b = await context(sessions), await context(sessions, "B")
-            first = asyncio.create_task(runner.ainvoke(plan_id="P", context=a))
+            first = asyncio.create_task(runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a)))
             try:
                 await asyncio.wait_for(entered.wait(), 15)
                 with pytest.raises(recovery.RecoveryBlockedError, match="正在运行"):
-                    await runner.ainvoke(plan_id="P", context=b)
+                    await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=b))
             finally:
                 release.set()
                 await asyncio.wait_for(first, 20)
@@ -387,7 +420,7 @@ def test_checkpoint_result_corruption_fails_before_any_new_external_call(databas
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
             a = await context(sessions)
-            first = await runner.ainvoke(plan_id="P", context=a)
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             async with sessions() as session:
                 run = (await session.scalars(select(InvestigationRunRow))).one()
             forged = first["task_execution_results"][0].model_copy(update={"execution_id": "forged-exec"})
@@ -395,7 +428,7 @@ def test_checkpoint_result_corruption_fails_before_any_new_external_call(databas
                 {"task_execution_results": [forged.model_dump(mode="json")]}, as_node="task_execution")
             before = list(agent.events)
             with pytest.raises(ledger.LedgerIntegrityError, match="执行事实"):
-                await runner.ainvoke(plan_id="P", context=a)
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             assert before == agent.events
     asyncio.run(scenario())
 
@@ -422,13 +455,13 @@ def test_lost_lock_connection_fences_old_worker_after_new_generation_finishes(da
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
             a, b = await context(sessions), await context(sessions, "B")
-            old = asyncio.create_task(runner.ainvoke(plan_id="P", context=a))
+            old = asyncio.create_task(runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a)))
             try:
                 await asyncio.wait_for(entered.wait(), 15)
                 # 只终止本测试刚创建的专用锁连接，模拟旧进程失联；不触及其他会话。
                 async with sessions.begin() as session:
                     assert await session.scalar(text("SELECT pg_terminate_backend(:pid)"), {"pid": guards[0].backend_pid})
-                new = await runner.ainvoke(plan_id="P", context=b, policy=RecoveryPolicy(retry_uncertain=True))
+                new = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=b), policy=RecoveryPolicy(retry_uncertain=True))
                 assert new["round_complete"]
             finally:
                 release.set()
@@ -458,13 +491,13 @@ def test_multiple_committed_results_require_explicit_immutable_selection(databas
                     await ledger.commit_result(session, f"legacy-query-{index}", f"legacy-result-{index}",
                         PhaseArtifact(query_request=KnowledgeSearchToolRequest(query="Query T0", top_k=1)))
             with pytest.raises(recovery.RecoveryBlockedError, match="多份已提交"):
-                await runner.ainvoke(plan_id="P", context=a)
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             assert not agent.events
-            output = await runner.ainvoke(plan_id="P", context=a,
+            output = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a),
                 policy=RecoveryPolicy(selected_attempts={key: "legacy-query-1"}))
             assert output["round_complete"] and "query:T0" not in agent.events
             with pytest.raises(ledger.LedgerConflictError, match="重新选择"):
-                await runner.ainvoke(plan_id="P", context=a,
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a),
                     policy=RecoveryPolicy(selected_attempts={key: "legacy-query-2"}))
     asyncio.run(scenario())
 
@@ -491,12 +524,12 @@ def test_committed_failure_rejection_and_zero_hits_never_implicitly_rerun(databa
             a = await context(sessions)
             if status == "REJECTED":
                 a = replace(a, authorize_knowledge=lambda *_: False)
-            first = await runner.ainvoke(plan_id="P", context=a)
+            first = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             assert first["task_execution_results"][0].status == ("SUCCEEDED" if status == "NO_HITS" else status)
             assert first["observation"].status == "INCONCLUSIVE"
         events = list(agent.events)
         async with resources(database, agent) as (sessions, saver, runner):
-            output = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            output = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B")))
             assert output == first and events == agent.events
     asyncio.run(scenario())
 
@@ -513,8 +546,8 @@ def test_lock_connections_do_not_starve_single_connection_ledger_pool(database, 
             async with postgres_checkpointer(database, setup=True) as saver:
                 runner = recovery.FirstRoundRecovery(agent, session_factory=sessions, checkpointer=saver)
                 a, b = await context(sessions, suffix="A"), await context(sessions, "B", suffix="B")
-                results = await asyncio.wait_for(asyncio.gather(runner.ainvoke(plan_id="PA", context=a),
-                    runner.ainvoke(plan_id="PB", context=b)), 30)
+                results = await asyncio.wait_for(asyncio.gather(runner.ainvoke(plan_id="PA", context=InvestigationInvocation(runtime=a)),
+                    runner.ainvoke(plan_id="PB", context=InvestigationInvocation(runtime=b))), 30)
                 assert all(result["round_complete"] for result in results)
         finally:
             await engine.dispose()
@@ -530,6 +563,7 @@ def test_actual_process_exit_after_t0_commit_resumes_in_new_process_state(databa
         child = r'''
 import asyncio, os, pytest
 from test_recovery_postgres import Agent, resources, context, retrieval
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow import recovery
 if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -544,7 +578,7 @@ async def crash(*args):
 recovery._phase = crash
 async def main():
     async with resources(os.environ["RECOVERY_TEST_DATABASE_URL"], agent) as (sessions, saver, runner):
-        await runner.ainvoke(plan_id="P", context=await context(sessions))
+        await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
 asyncio.run(main())
 '''
         environment = dict(os.environ)
@@ -556,7 +590,7 @@ asyncio.run(main())
         assert result.returncode == 23, result.stderr.decode(errors="replace")[-2000:]
         route["collection"] = "physical-v2"
         async with resources(database, agent) as (sessions, saver, runner):
-            output = await runner.ainvoke(plan_id="P", context=await context(sessions, "B"))
+            output = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions, "B")))
             assert agent.events == ["query:T1", "search:T1", "observation"]
             assert [row.payload.retrieved.snapshot.collection for row in output["task_execution_results"]] == ["physical-v1", "physical-v2"]
     asyncio.run(scenario())

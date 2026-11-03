@@ -2,6 +2,9 @@
 
 状态：已实现，待 review。只收敛阶段执行代码；不改变 topology、数据库 schema 或 checkpoint v2，不实现 Stage 9。
 
+后续：8D-2 已 review SEALED。8D-3 已删除下文历史描述中的裸 Runtime 自动包装兼容，
+当前调用示例见 [统一调用契约](workflow-invocation-convergence.md)。
+
 ## 1. 解决的问题
 
 8D-1 已统一拓扑，但普通任务循环和恢复任务循环仍分别维护 Query → Search → TaskStatus。它们容易在输入校验、结果身份或失败处理上发生偏差。

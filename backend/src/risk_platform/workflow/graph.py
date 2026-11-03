@@ -5,7 +5,7 @@ from langgraph.runtime import Runtime
 
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow.contracts import InitialPlanningInput
-from risk_platform.workflow.runtime import InvestigationAccessError, InvestigationAction, InvestigationRuntimeContext, check_runtime, knowledge_authorizer
+from risk_platform.workflow.runtime import InvestigationAction, check_runtime, knowledge_authorizer
 from risk_platform.workflow.nodes import (
     initial_planning,
     observation,
@@ -13,7 +13,7 @@ from risk_platform.workflow.nodes import (
     task_execution,
 )
 from risk_platform.workflow.state import InvestigationState
-from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.invocation import InvestigationInvocation, require_invocation
 
 
 def _route_after_replanning(
@@ -31,15 +31,8 @@ def build_investigation_graph(
     """共享图仅绑定服务依赖；每次 ainvoke 必须提供独立可信 context。"""
 
     def invocation(runtime):
-        # 保留 8B 普通调用的 context API；恢复模式只能由可信包装对象开启。
-        value = runtime.context
-        if isinstance(value, InvestigationRuntimeContext):
-            return InvestigationInvocation(runtime=value)
-        if not isinstance(value, InvestigationInvocation):
-            raise InvestigationAccessError("调查图需要可信运行上下文")
-        if value.recovery is not None and value.recovery.context is not value.runtime:
-            raise InvestigationAccessError("恢复上下文与可信身份不一致")
-        return value
+        # 声明类型与实际调用一致，不再兼容裸 InvestigationRuntimeContext。
+        return require_invocation(runtime.context, claimed=True)
 
     def wire_update(update, call):
         if call.recovery is None:
@@ -53,7 +46,7 @@ def build_investigation_graph(
         from risk_platform.workflow.recovery import ledger_phase_executor
         return ledger_phase_executor(session_factory, call.recovery)
 
-    async def plan_node(state: InvestigationState, runtime: Runtime):
+    async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         if call.recovery is not None:
             from risk_platform.workflow.recovery import load_accepted_plan
@@ -63,7 +56,7 @@ def build_investigation_graph(
         return initial_planning({**state, "planning_input": source.model_copy(deep=True)},
                                 investigation_agent=investigation_agent)
 
-    async def execute_node(state: InvestigationState, runtime: Runtime):
+    async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
         trusted = check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
@@ -74,7 +67,7 @@ def build_investigation_graph(
                                     execute_phase=phase_executor(call))
         return wire_update(update, call)
 
-    async def observe_node(state: InvestigationState, runtime: Runtime):
+    async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
         trusted = check_runtime(call.runtime, InvestigationAction.CONTINUE, source)

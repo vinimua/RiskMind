@@ -46,6 +46,7 @@ checkpointer 自有表由官方 saver.setup 显式初始化，与 Alembic 业务
 ```python
 from risk_platform.workflow.checkpoints import postgres_checkpointer
 from risk_platform.workflow.recovery import FirstRoundRecovery
+from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.persistence.recovery_contracts import RecoveryPolicy
 
 # AcceptedPlan、Investigation、Round 已通过原仓储可靠提交。
@@ -56,7 +57,8 @@ async with postgres_checkpointer(checkpoint_database_url, setup=False) as saver:
         session_factory=sessions,
         checkpointer=saver,
     )
-    result = await runner.ainvoke(plan_id=accepted_plan_id, context=context)
+    invocation = InvestigationInvocation(runtime=context)
+    result = await runner.ainvoke(plan_id=accepted_plan_id, context=invocation)
 ```
 
 runner 和 graph 可以复用，当前 actor/权限/预算按每次调用提供。
@@ -132,7 +134,8 @@ ledger 和 checkpoint 不承诺跨连接原子提交。
 
 ```python
 policy = RecoveryPolicy(selected_attempts={operation_key: chosen_attempt_id})
-result = await runner.ainvoke(plan_id=plan_id, context=context, policy=policy)
+result = await runner.ainvoke(plan_id=plan_id,
+                             context=InvestigationInvocation(runtime=context), policy=policy)
 ```
 
 选择保存到 investigation_run_selections 并关联本次 claim。

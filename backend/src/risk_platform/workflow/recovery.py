@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 from risk_platform.agents.prompts import KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT, KNOWLEDGE_QUERY_SYSTEM_PROMPT
 from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, TaskExecutionResult
 from risk_platform.workflow import access, nodes
-from risk_platform.workflow.invocation import InvestigationInvocation
+from risk_platform.workflow.invocation import InvestigationInvocation, require_invocation
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.observation import RoundObservation
 from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime
@@ -286,7 +286,11 @@ def ledger_phase_executor(sessions, invocation):
 
 
 class FirstRoundRecovery:
-    """带安全入口的 LangGraph 句柄；不暴露任意 thread_id、State 更新或跳步恢复。"""
+    """Accepted Plan 的统一持久化调用入口，首次执行和恢复使用同一 ainvoke。
+
+    类名保留以避免无必要的改名；不要求先有 checkpoint，也不接受用户指定恢复模式。
+    不暴露任意 thread_id、State 更新或跳步恢复。
+    """
 
     def __init__(self, agent, *, session_factory, checkpointer, embedding_client=None, milvus_client=None):
         if not isinstance(getattr(agent, "model", None), str) or not agent.model.strip():
@@ -350,7 +354,9 @@ class FirstRoundRecovery:
             if values.get("investigation_status", "OPEN") != "OPEN":
                 raise ledger.LedgerIntegrityError("首轮恢复不能关闭案件")
 
-    async def ainvoke(self, *, plan_id, context: InvestigationRuntimeContext, policy: RecoveryPolicy | None = None):
+    async def ainvoke(self, *, plan_id, context: InvestigationInvocation, policy: RecoveryPolicy | None = None):
+        # 对外统一包装，内部 claim 必须由本次调用鉴权和加锁后生成。
+        context = require_invocation(context).runtime
         policy = RecoveryPolicy.model_validate_json((policy or RecoveryPolicy()).model_dump_json())
         async with self._sessions() as session:
             trusted = await _authorize(session, context)  # 在任何 checkpoint 读取/反序列化前。
