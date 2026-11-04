@@ -2,6 +2,8 @@
 
 import asyncio
 
+from risk_platform.execution import knowledge as registered_knowledge
+
 import pytest
 
 from risk_platform.workflow import nodes
@@ -61,7 +63,7 @@ def test_task_identity_is_validated_before_phase_can_commit(monkeypatch):
         return TaskExecutionResult(execution_id="E", task_id="OTHER", capability="KNOWLEDGE_RETRIEVAL",
             status="FAILED", started_at=now, completed_at=now,
             error=ExecutionError(category="INTERNAL", code="X", message="错误", retryable=False))
-    monkeypatch.setattr(nodes, "execute_knowledge_search", wrong)
+    monkeypatch.setattr(registered_knowledge, "execute_knowledge_search", wrong)
     async def execute(kind, produce, **metadata):
         output = await produce()
         committed.append(kind)

@@ -1015,3 +1015,12 @@ scope/index_profile/max_top_k/工具超时、独立知识授权和无模型范�
 首次执行与恢复继续走同一持久化 runner，历史 FirstRoundSpec、业务摘要、Attempt 归因
 和数据库 schema 不变。现有首轮 runner 仍只支持知识任务；通用 Runtime 不代表已实现其他工具。
 完整设计与接入示例见 [可信环境与知识工具](workflow-trusted-tools.md)。
+
+
+## 最小原生工具选择接入
+
+知识任务的 Query Formulation 使用单次原生 function calling，在静态白名单中选择 knowledge_search
+并生成专用参数。execution/tools.py 保存声明与 handler 映射，实际执行复用 7A。
+只接受一次调用，不增加图节点、模型调用次数或自由 ReAct 工具循环；当前只有一个工具。
+工具声明和协议参数参与查询调用摘要，旧摘要运行不自动迁移。
+详见 [工具注册与模型选择](workflow-tool-registration.md)。

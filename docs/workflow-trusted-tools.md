@@ -17,11 +17,11 @@ InvestigationInvocation
 │           ├── execution：知识专用范围、profile、top_k、超时
 │           ├── authorize：知识工具独立权限
 │           └── allow_unscoped：无案件模型时显式许可知识范围
-└── recovery：内部运行锁、generation、规格和恢复策略
+└── execution：内部运行锁、generation、规格和恢复策略
 ```
 
 通用 runtime.py 不导入知识模块或 KnowledgeExecutionContext；知识特有逻辑集中在 knowledge_tool.py。
-Invocation 与 recovery 控制信息不进入业务 State 或 checkpoint。
+Invocation 与 execution 控制信息不进入业务 State 或 checkpoint。
 
 ## 2. 可信不等于只做类型声明
 

@@ -18,7 +18,7 @@ invocation = InvestigationInvocation(runtime=trusted_runtime)
 `trusted_runtime` 仍由可信应用认证 actor、加载 canonical 记录并提供真实授权策略后建立。
 包装对象不是认证凭据，不能从模型或 HTTP body 的身份声明直接生成可信授权。
 
-`require_invocation()` 核验包装及其中 runtime 的实际类型。持久化公开入口拒绝所有预填 recovery claim；
+`require_invocation()` 核验包装及其中 runtime 的实际类型。持久化公开入口拒绝所有预填 execution claim；
 只有鉴权、加锁之后，该入口才生成内部 claim 并传给 compiled graph。图还检查 claim 类型和 runtime 身份一致性。
 
 LangGraph 自身可能将符合 context schema 的 mapping 构造成 dataclass；节点拿到后仍只接受统一包装类型，
@@ -65,7 +65,7 @@ run_id 仍由 investigation/round/plan 的稳定身份确定。Accepted Plan 前
 actor/scope/model 绑定和每次 claim 的 actor attribution 均保持。
 
 可选 `policy` 仍是可信调用参数，保留原来的显式 retry / selection 规则，不写入模型 State。
-公开 invocation 的 recovery 始终为 None，入口生成的 claim 不回填、改写调用方对象。
+公开 invocation 的 execution 始终为 None，入口生成的 claim 不回填、改写调用方对象。
 
 ## 4. 从旧调用迁移
 

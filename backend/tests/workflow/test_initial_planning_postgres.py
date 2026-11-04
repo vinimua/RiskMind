@@ -214,7 +214,7 @@ def test_lost_planning_lock_fences_old_candidate_after_new_actor_finishes(databa
             await seed_round(sessions)
             invoke = old._graph.ainvoke
             async def capture(*args, context, **kwargs):
-                observed["pid"] = context.recovery.guard.backend_pid
+                observed["pid"] = context.execution.guard.backend_pid
                 return await invoke(*args, context=context, **kwargs)
             monkeypatch.setattr(old._graph, "ainvoke", capture)
             first = asyncio.create_task(call(old, sessions))

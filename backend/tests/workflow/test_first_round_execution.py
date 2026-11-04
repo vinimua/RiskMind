@@ -2,6 +2,8 @@
 
 import asyncio
 
+from risk_platform.execution import knowledge as registered_knowledge
+
 import pytest
 
 from workflow_test_helpers import run_phase, run_business_nodes
@@ -173,7 +175,7 @@ def test_wrong_task_result_identity_not_written_to_state(monkeypatch):
         return TaskExecutionResult(execution_id="E", task_id="OTHER", capability="KNOWLEDGE_RETRIEVAL",
                                    status="FAILED", started_at=now, completed_at=now,
                                    error=ExecutionError(category="INTERNAL", code="X", message="错误", retryable=False))
-    monkeypatch.setattr(nodes, "execute_knowledge_search", wrong)
+    monkeypatch.setattr(registered_knowledge, "execute_knowledge_search", wrong)
     with pytest.raises(ValueError, match="身份不一致"):
         asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
                                    execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))

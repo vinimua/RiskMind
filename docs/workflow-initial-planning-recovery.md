@@ -113,3 +113,6 @@ prepare_plan 内复用 nodes.initial_planning / InvestigationAgent.initial_plan�
 实际验证：规划专项 17 passed；最终 backend 全量启用真实 PostgreSQL，543 passed、7 skipped，
 1 条已有依赖弃用警告。包含新规划候选和旧知识执行阶段的真实 os._exit 恢复测试。
 git diff --check、Python 语法与新增文件空白检查通过。测试未调用付费模型 API。
+
+
+并发、权限、锁与事务的详细场景推演见 [prepare_plan 并发与鉴权详解](workflow-prepare-plan-concurrency-authorization.md)。

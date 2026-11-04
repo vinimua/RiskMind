@@ -24,6 +24,7 @@ from risk_platform.knowledge.retrieval import DenseChildRetrievalResult, Retriev
 from risk_platform.knowledge.serving_contracts import KnowledgeContext, RetrievalRouteSnapshot
 from risk_platform.workflow import recovery
 from risk_platform.agents.prompts import KNOWLEDGE_QUERY_SYSTEM_PROMPT
+from risk_platform.execution.tools import query_contract_digest
 from risk_platform.workflow import access
 from risk_platform.workflow.access import load_runtime_context
 from risk_platform.workflow.checkpoints import JsonCheckpointSerializer, postgres_checkpointer
@@ -186,7 +187,7 @@ def test_fresh_and_interrupted_resume_use_same_explicit_invocation_contract(data
             invoke = runner._graph.ainvoke
             async def capture(initial, *args, context, **kwargs):
                 assert isinstance(context, InvestigationInvocation)
-                assert context.recovery is not None and context.runtime is public.runtime
+                assert context.execution is not None and context.runtime is public.runtime
                 calls.append(initial)
                 return await invoke(initial, *args, context=context, **kwargs)
             monkeypatch.setattr(runner._graph, "ainvoke", capture)
@@ -194,7 +195,7 @@ def test_fresh_and_interrupted_resume_use_same_explicit_invocation_contract(data
                 await runner.ainvoke(plan_id="P", context=public)
             output = await runner.ainvoke(plan_id="P", context=public)
             assert calls[0]["checkpoint_schema_version"] == 2 and calls[1] is None
-            assert public.recovery is None  # 内部 claim 不回填到调用方上下文。
+            assert public.execution is None  # 内部 claim 不回填到调用方上下文。
             assert output["round_complete"] and agent.events.count("query:T0") == 1
     asyncio.run(scenario())
 
@@ -485,7 +486,7 @@ def test_multiple_committed_results_require_explicit_immutable_selection(databas
             a = await context(sessions)
             value = BusinessOperationInput(investigation_id="I", round_id="R", plan_id="P", task_id="T0",
                 operation_type="QUERY_FORMULATION", model_name=agent.model,
-                prompt_version=hashlib.sha256(KNOWLEDGE_QUERY_SYSTEM_PROMPT.encode()).hexdigest(), max_top_k=20)
+                prompt_version=query_contract_digest(KNOWLEDGE_QUERY_SYSTEM_PROMPT), max_top_k=20)
             async with sessions.begin() as session:
                 key = await access.register_authorized_operation(session, value, context=a)
                 for index in (1, 2):

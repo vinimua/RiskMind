@@ -42,12 +42,12 @@ def build_investigation_graph(
 
     def phase_executor(call):
         from risk_platform.workflow.recovery import ledger_phase_executor
-        return ledger_phase_executor(session_factory, call.recovery)
+        return ledger_phase_executor(session_factory, call.execution)
 
     async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)
         from risk_platform.workflow.recovery import prepare_plan
-        return await prepare_plan(state, call.recovery, sessions=session_factory, agent=investigation_agent)
+        return await prepare_plan(state, call.execution, sessions=session_factory, agent=investigation_agent)
 
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = invocation(runtime)

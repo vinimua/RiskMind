@@ -13,7 +13,7 @@ from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.execution.contracts import (
     ErrorCategory, ExecutionError, ExecutionStatus, KnowledgeExecutionContext, TaskExecutionResult,
 )
-from risk_platform.execution.knowledge import execute_knowledge_search
+from risk_platform.execution.tools import KNOWLEDGE_SEARCH, execute_registered_tool
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.state import InvestigationState
 from risk_platform.workflow.persistence.contracts import OperationType
@@ -138,8 +138,8 @@ async def task_execution(
             result = formed.failure
         else:
             async def search():
-                result = await execute_knowledge_search(
-                    task, formed.candidate, context=trusted, authorize=authorize, session_factory=session_factory,
+                result = await execute_registered_tool(
+                    KNOWLEDGE_SEARCH.name, task, formed.candidate, context=trusted, authorize=authorize, session_factory=session_factory,
                     embedding_client=embedding_client, milvus_client=milvus_client,
                 )
                 # 入账前校验身份，不能先保存错误结果再拒绝写 State。

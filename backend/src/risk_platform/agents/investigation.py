@@ -58,7 +58,7 @@ class InvestigationAgent:
         *, goal: str, max_top_k: int,
     ):
         """将任务意图转换为候选请求；可信身份、策略与物理集合不交给模型决定。"""
-        from risk_platform.execution.contracts import KnowledgeSearchToolRequest
+        from risk_platform.execution.tools import tool_declarations, parse_tool_choice
 
         if task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
             raise ValueError("Query Formulation 只支持知识检索任务")
@@ -71,12 +71,14 @@ class InvestigationAgent:
             model=self.model,
             messages=[{"role": "system", "content": KNOWLEDGE_QUERY_SYSTEM_PROMPT},
                       {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            response_format={"type": "json_object"},
+            tools=tool_declarations(task.capability),
+            tool_choice="required",
+            parallel_tool_calls=False,
         )
-        choice = response.choices[0]
-        if choice.finish_reason != "stop" or not choice.message.content:
-            raise ValueError("查询构造未完整返回")
-        return KnowledgeSearchToolRequest.model_validate_json(choice.message.content)
+        request = parse_tool_choice(response.choices[0], task.capability)
+        if request.top_k > max_top_k:
+            raise ValueError("工具请求数量超过本次允许上限")
+        return request
 
     def initial_plan(
         self,

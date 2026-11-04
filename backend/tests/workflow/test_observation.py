@@ -1,6 +1,8 @@
 """7C 的执行事实、来源链与解释失败语义；不使用真实模型。"""
 
 import asyncio
+
+from risk_platform.execution import knowledge as registered_knowledge
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -186,7 +188,7 @@ def test_business_observation_does_not_close_case_or_change_execution_results(mo
     pending.tasks[0].status = TaskStatus.PENDING
     async def execute(*_, **__):
         return results[0]
-    monkeypatch.setattr(nodes, "execute_knowledge_search", execute)
+    monkeypatch.setattr(registered_knowledge, "execute_knowledge_search", execute)
     class Agent:
         def initial_plan(self, _):
             return pending

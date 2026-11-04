@@ -21,7 +21,7 @@ def test_graph_rejects_invalid_context_before_planning(kind):
         "missing": None,
         "dict": {"runtime": {"actor_id": "forged"}},
         "invalid-runtime": InvestigationInvocation(runtime=None),
-        "forged-claim": InvestigationInvocation(runtime=trusted, recovery=object()),
+        "forged-claim": InvestigationInvocation(runtime=trusted, execution=object()),
     }
     class Agent:
         def initial_plan(self, *_):
@@ -36,7 +36,7 @@ def test_graph_rejects_invalid_context_before_planning(kind):
 def test_persistent_entry_rejects_invalid_context_before_database_or_checkpoint(kind):
     trusted = make_runtime(planning())
     values = {"bare": trusted, "missing": None, "dict": {"runtime": trusted},
-              "forged-claim": InvestigationInvocation(runtime=trusted, recovery=object())}
+              "forged-claim": InvestigationInvocation(runtime=trusted, execution=object())}
     # 未设置任何数据库/检查点依赖；非法输入必须在尝试访问依赖前拒绝。
     runner = FirstRoundRecovery.__new__(FirstRoundRecovery)
     with pytest.raises(InvestigationAccessError):
@@ -47,4 +47,4 @@ def test_public_invocation_is_explicit_and_has_no_recovery_mode():
     runtime = make_runtime(planning())
     invocation = InvestigationInvocation(runtime=runtime)
     assert require_invocation(invocation) is invocation
-    assert invocation.recovery is None and invocation.runtime is runtime
+    assert invocation.execution is None and invocation.runtime is runtime

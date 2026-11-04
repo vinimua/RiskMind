@@ -40,6 +40,11 @@ class AttemptReceipt:
 async def load_runtime_context(session, *, investigation_id, round_id, actor_id, tools=(),
                                authorize_resource, action: InvestigationAction,
                                timeout_seconds=30.0) -> InvestigationRuntimeContext:
+# 它们按主键取得：
+# - 案件记录：案件 ID、创建者、原始调查输入等。
+# - 轮次记录：轮次 ID、所属案件、第几轮等。
+# session.get() 可能使用当前 Session 已加载的对象，因此不保证每次调用都会重新发送 SQL。
+    
     investigation = await session.get(InvestigationRow, investigation_id)
     round_record = await session.get(RoundRow, round_id)
     if investigation is None or round_record is None:
@@ -62,8 +67,10 @@ async def _bound_context(session, context, action):
     if current.investigation != context.investigation or current.round != context.round:
         raise InvestigationAccessError("运行上下文与持久化调查事实不一致")
     return trusted
-
-
+# 不过，_bound_context() 不只调用权限函数，它还核对：
+# 案件与轮次是否匹配；
+# 传入的案件事实是否与 PostgreSQL 记录一致；
+# 当前知识工具绑定的 actor、模型范围是否正确
 def _belongs(value, context):
     if (value.investigation_id, value.round_id) != (context.investigation.investigation_id, context.round.round_id):
         raise InvestigationAccessError("不能跨调查或轮次访问操作")

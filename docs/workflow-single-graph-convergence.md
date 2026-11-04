@@ -42,10 +42,10 @@ START → prepare_plan → task_execution → observation → replanning
 @dataclass(frozen=True)
 class InvestigationInvocation:
     runtime: InvestigationRuntimeContext
-    recovery: "_Invocation | None" = None
+    execution: "_Invocation | None" = None
 ```
 
-普通调用可以继续使用 8B 的 `context=InvestigationRuntimeContext(...)`，节点内部将其适配为没有 recovery 的包装。
+普通调用可以继续使用 8B 的 `context=InvestigationRuntimeContext(...)`，节点内部将其适配为没有 execution 的包装。
 恢复入口负责取得运行锁后构造包装，不接受客户端通过 State 开启恢复模式。
 包装中的基础 runtime 和恢复调用里的身份上下文必须为同一对象，否则拒绝。
 

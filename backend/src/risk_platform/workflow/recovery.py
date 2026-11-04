@@ -15,6 +15,7 @@ from sqlalchemy.pool import NullPool
 
 from risk_platform.agents.prompts import INITIAL_PLANNING_SYSTEM_PROMPT, KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT, KNOWLEDGE_QUERY_SYSTEM_PROMPT
 from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, TaskExecutionResult
+from risk_platform.execution.tools import query_contract_digest
 from risk_platform.workflow import access, nodes
 from risk_platform.workflow.invocation import InvestigationInvocation, require_invocation
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
@@ -60,6 +61,12 @@ async def _authorize(session, context):
     await access._bound_context(session, context, InvestigationAction.CONTINUE)
     return await access._bound_context(session, context, InvestigationAction.READ)
 
+# | 用户权限 | `_authorize()` 结果 |
+# |---|---|
+# | 只有 READ | 拒绝：可以查看，但不能继续执行 |
+# | 只有 CONTINUE | 拒绝：恢复流程还需要读取历史 |
+# | READ + CONTINUE | 通过 |
+# | 都没有 | 拒绝 |
 
 @dataclass
 class _ClaimGuard:
@@ -500,7 +507,7 @@ class FirstRoundRecovery:
         spec = FirstRoundSpec(run_id=run_id, investigation_id=case_id, round_id=round_id, plan_id=plan_id,
             scope=trusted.scope, index_profile=trusted.index_profile, max_top_k=trusted.max_top_k,
             query_model=self._agent.model, observation_model=self._agent.model,
-            query_prompt_digest=hashlib.sha256(KNOWLEDGE_QUERY_SYSTEM_PROMPT.encode()).hexdigest(),
+            query_prompt_digest=query_contract_digest(KNOWLEDGE_QUERY_SYSTEM_PROMPT),
             observation_prompt_digest=hashlib.sha256(KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT.encode()).hexdigest())
         planning_spec = None
         if creating_plan or preparation is not None:
@@ -520,7 +527,7 @@ class FirstRoundRecovery:
             else:
                 initial = None if snapshot.values else _wire(dict(checkpoint_schema_version=2, run_id=run_id, plan_id=plan_id,
                     planning_input=context.investigation.planning_input))
-                output = await self._graph.ainvoke(initial, config, context=InvestigationInvocation(runtime=context, recovery=invocation), durability="sync")
+                output = await self._graph.ainvoke(initial, config, context=InvestigationInvocation(runtime=context, execution=invocation), durability="sync")
             await self._validate(output, invocation)
             return dict(run_id=run_id, plan_id=plan_id,
                 planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
