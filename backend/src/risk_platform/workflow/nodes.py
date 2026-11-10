@@ -1,7 +1,6 @@
 """首轮知识执行与结构化 Observation；真实 Replanning 尚未实现。"""
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -11,10 +10,13 @@ from pydantic import ValidationError
 
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.execution.contracts import (
-    ErrorCategory, ExecutionError, ExecutionStatus, KnowledgeExecutionContext, TaskExecutionResult,
+    ErrorCategory, ExecutionError, ExecutionStatus, TaskExecutionResult,
 )
-from risk_platform.execution.tools import KNOWLEDGE_SEARCH, execute_registered_tool
-from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, TaskStatus
+from risk_platform.execution.tools import (
+    ToolCall, ToolUnavailableError, tool_definition, available_tools, validate_tool_call, execute_registered_tool,
+)
+from risk_platform.workflow.runtime import InvestigationRuntimeContext, InvestigationAction, check_runtime
+from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
 from risk_platform.workflow.state import InvestigationState
 from risk_platform.workflow.persistence.contracts import OperationType
 from risk_platform.workflow.observation import (
@@ -27,46 +29,52 @@ def initial_planning(
     state: InvestigationState,
     *,
     investigation_agent: InvestigationAgent,
+    memory_context=None,
 ) -> dict[str, object]:
     """Ask the Investigation Agent what the first round should investigate."""
 
-    plan = investigation_agent.initial_plan(state["planning_input"])
+    options = {"memory_context": memory_context} if memory_context is not None and memory_context.memories else {}
+    plan = investigation_agent.initial_plan(state["planning_input"], **options)
 
     # 新轮次清除旧的结束标记，案件保持开放。
     return {"investigation_plan": plan, "task_execution_results": [], "observation": None,
             "round_complete": False, "investigation_status": "OPEN"}
 
 
-async def formulate_task_query(task, planning_input, *, goal, investigation_agent, trusted):
+async def formulate_task_query(task, planning_input, *, goal, investigation_agent, runtime_context, memory_context=None):
     """复用 7B 查询形成与错误分类；8C 将其产物单独入账。"""
     try:
-        if task.capability == CapabilityType.KNOWLEDGE_RETRIEVAL:
-            # 现有 Agent 使用同步 SDK，移到线程避免阻塞事件循环；不把 objective 当作 query。
-            async with asyncio.timeout(trusted.timeout_seconds):
-                candidate = await asyncio.to_thread(
-                    investigation_agent.formulate_knowledge_query,
-                    task.model_copy(deep=True), planning_input.model_copy(deep=True),
-                    goal=goal, max_top_k=trusted.max_top_k,
-                )
-        else:
-            # 不运行其他能力，也不擅自把它改成知识任务；交给 7A 明确拒绝。
-            candidate = {}
+        offered = available_tools(task.capability, runtime_context)
+        declarations = [tool.declaration() for tool in offered]
+        limits = {tool.name: tool.model_input(runtime_context) for tool in offered}
+        # 只传公开声明和参数限制，运行身份、权限回调不进入模型输入。
+        async with asyncio.timeout(runtime_context.timeout_seconds):
+            call = await asyncio.to_thread(
+                investigation_agent.formulate_tool_call,
+                task.model_copy(deep=True), planning_input.model_copy(deep=True),
+                goal=goal, tools=declarations, tool_limits=limits,
+                **({"memory_context": memory_context} if memory_context is not None and memory_context.memories else {}),
+            )
+        candidate = validate_tool_call(call, task.capability, runtime_context)
+    except ToolUnavailableError as failure:
+        error = ExecutionError(category=ErrorCategory.AUTHORIZATION if failure.code == "TOOL_NOT_BOUND" else ErrorCategory.VALIDATION,
+                               code=failure.code, message="当前任务没有已绑定的可用工具", retryable=False)
     except (TimeoutError, APITimeoutError):
         error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_TIMEOUT",
-                               message="知识查询构造超时，未调用检索工具", retryable=True)
+                               message="工具请求构造超时，未执行工具", retryable=True)
     except (ValidationError, ValueError):
         error = ExecutionError(category=ErrorCategory.VALIDATION, code="QUERY_FORMULATION_INVALID",
-                               message="知识查询构造结果非法，未调用检索工具", retryable=False)
+                               message="工具请求构造结果非法，未执行工具", retryable=False)
     except APIConnectionError:
         error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_UNAVAILABLE",
-                               message="知识查询构造服务不可用，未调用检索工具", retryable=True)
+                               message="工具请求构造服务不可用，未执行工具", retryable=True)
     except APIStatusError as failure:
         error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_API_FAILURE",
-                               message="知识查询构造服务请求失败，未调用检索工具",
+                               message="工具请求构造服务请求失败，未执行工具",
                                retryable=failure.status_code == 429 or failure.status_code >= 500)
     except Exception:
         error = ExecutionError(category=ErrorCategory.INTERNAL, code="QUERY_FORMULATION_FAILED",
-                               message="知识查询构造未能完成，未调用检索工具", retryable=False)
+                               message="工具请求构造未能完成，未执行工具", retryable=False)
     else:
         error = None
     return (candidate if error is None else None), error
@@ -74,14 +82,15 @@ async def formulate_task_query(task, planning_input, *, goal, investigation_agen
 
 @dataclass(frozen=True)
 class QueryOutcome:
-    """内部查询阶段结果；原始候选仅交给 7A 或账本适配器校验。"""
+    """请求构造阶段产物：保留工具名称和专用参数，账本适配器负责版本校验。"""
 
     candidate: object = None
+    tool_name: str | None = None
     failure: TaskExecutionResult | None = None
 
 
 def _business_model(model, value):
-    # 两种入口共用节点，JSON 字典与业务对象均重新经过契约校验。
+    # JSON 检查点与直接单元测试对象均重新经过契约校验。
     return model.model_validate_json(value.model_dump_json()) if hasattr(value, "model_dump_json") else model.model_validate(value)
 
 
@@ -94,11 +103,8 @@ def _task_result(task, result):
 
 async def task_execution(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
-    execution_context: KnowledgeExecutionContext,
-    authorize: Callable[[str, str, KnowledgeExecutionContext], bool],
+    runtime_context: InvestigationRuntimeContext,
     execute_phase,
-    session_factory=None, embedding_client=None, milvus_client=None,
-    before_task: Callable[[], object] | None = None,
 ) -> dict[str, object]:
     """唯一任务循环；阶段执行器决定直接执行或通过账本复用、提交。
 
@@ -110,7 +116,7 @@ async def task_execution(
     phase = execute_phase
     plan = _business_model(InvestigationPlan, state["investigation_plan"])
     planning_input = _business_model(InitialPlanningInput, state["planning_input"])
-    trusted = KnowledgeExecutionContext.model_validate_json(execution_context.model_dump_json())
+    check_runtime(runtime_context, InvestigationAction.CONTINUE, planning_input)
     ids = [task.task_id for task in plan.tasks]
     if any(not key.strip() for key in ids) or len(ids) != len(set(ids)):
         raise ValueError("正式任务 ID 必须非空且唯一")
@@ -118,34 +124,37 @@ async def task_execution(
         raise ValueError("首轮执行要求非空且全部待执行的正式任务")
     results, tasks = [], []
     for task in plan.tasks:
-        if before_task is not None:
-            before_task()
+        check_runtime(runtime_context, InvestigationAction.CONTINUE, planning_input)
 
-        async def query():
+        async def query(*, memory_context=None):
             started = datetime.now(timezone.utc)
             candidate, error = await formulate_task_query(
-                task, planning_input, goal=plan.goal, investigation_agent=investigation_agent, trusted=trusted,
+                task, planning_input, goal=plan.goal, investigation_agent=investigation_agent, runtime_context=runtime_context,
+                memory_context=memory_context,
             )
             if error is not None:
                 return QueryOutcome(failure=TaskExecutionResult(
                     execution_id="exec-" + uuid4().hex, task_id=task.task_id, capability=task.capability,
-                    status=ExecutionStatus.FAILED, started_at=started, completed_at=datetime.now(timezone.utc), error=error,
+                    status=ExecutionStatus.REJECTED if error.code in {"TOOL_NOT_BOUND", "UNSUPPORTED_CAPABILITY"} else ExecutionStatus.FAILED,
+                    started_at=started, completed_at=datetime.now(timezone.utc), error=error,
                 ))
-            return QueryOutcome(candidate=candidate)
+            return QueryOutcome(candidate=candidate.arguments, tool_name=candidate.tool_name)
 
         formed = await phase(OperationType.QUERY_FORMULATION, query, task_id=task.task_id)
         if formed.failure is not None:
             result = formed.failure
         else:
-            async def search():
+            # 恢复后也保留所选工具名，不能把所有请求固定送往知识工具。
+            selected = validate_tool_call(ToolCall(formed.tool_name, formed.candidate), task.capability, runtime_context)
+            definition = tool_definition(selected.tool_name)
+            async def execute_selected():
                 result = await execute_registered_tool(
-                    KNOWLEDGE_SEARCH.name, task, formed.candidate, context=trusted, authorize=authorize, session_factory=session_factory,
-                    embedding_client=embedding_client, milvus_client=milvus_client,
+                    selected.tool_name, task, selected.arguments, runtime_context=runtime_context,
                 )
                 # 入账前校验身份，不能先保存错误结果再拒绝写 State。
                 return _task_result(task, result)
-            result = await phase(OperationType.KNOWLEDGE_EXECUTION, search,
-                                 task_id=task.task_id, candidate=formed.candidate)
+            result = await phase(definition.execution_phase, execute_selected,
+                                 task_id=task.task_id, candidate=selected.arguments, tool_name=selected.tool_name)
         result = _task_result(task, result)
         if any(previous.execution_id == result.execution_id for previous in results):
             raise ValueError("本轮执行记录 ID 不能重复")
@@ -157,8 +166,9 @@ async def task_execution(
 
 
 async def observation(state: InvestigationState, *, investigation_agent: InvestigationAgent,
-                      execution_context: KnowledgeExecutionContext, execute_phase) -> dict[str, object]:
+                      runtime_context: InvestigationRuntimeContext, execute_phase) -> dict[str, object]:
     """统一 Observation 阶段入口，分离解释逻辑与持久化机制。"""
+    check_runtime(runtime_context, InvestigationAction.CONTINUE, _business_model(InitialPlanningInput, state["planning_input"]))
     plan = _business_model(InvestigationPlan, state["investigation_plan"])
     results = [_business_model(TaskExecutionResult, row) for row in state["task_execution_results"]]
     # 进入模型或持久化阶段前核验完整输入，不保存损坏的业务事实。
@@ -166,7 +176,7 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
     async def explain():
         update = await _interpret_observation(
             dict(investigation_plan=plan, task_execution_results=results),
-            investigation_agent=investigation_agent, execution_context=execution_context,
+            investigation_agent=investigation_agent, runtime_context=runtime_context,
         )
         return update["observation"]
     if not callable(execute_phase):
@@ -177,7 +187,7 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
 
 async def _interpret_observation(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
-    execution_context: KnowledgeExecutionContext,
+    runtime_context: InvestigationRuntimeContext,
 ) -> dict[str, object]:
     """先校验执行事实，再解释并验证来源。没有知识或解释失败时明确不确定。"""
     plan, results = validate_round_inputs(state["investigation_plan"], state["task_execution_results"])
@@ -187,7 +197,7 @@ async def _interpret_observation(
             results, "NO_KNOWLEDGE_AVAILABLE", "本轮没有可用于解释的知识，未调用解释模型",
         )}
     try:
-        async with asyncio.timeout(execution_context.timeout_seconds):
+        async with asyncio.timeout(runtime_context.timeout_seconds):
             draft = await asyncio.to_thread(
                 investigation_agent.observe_knowledge_round, plan.model_copy(deep=True),
                 [result.model_copy(deep=True) for result in results],

@@ -1,6 +1,7 @@
 """8C 真实 PG ledger + 官方 PostgresSaver；模型/检索替身不产生外部费用。"""
 
 import asyncio
+from workflow_test_helpers import tool_call
 import hashlib
 import os
 from pathlib import Path
@@ -23,6 +24,7 @@ from risk_platform.knowledge.context_resolution import ContextResolutionResult
 from risk_platform.knowledge.retrieval import DenseChildRetrievalResult, RetrievedKnowledgeHit
 from risk_platform.knowledge.serving_contracts import KnowledgeContext, RetrievalRouteSnapshot
 from risk_platform.workflow import recovery
+from risk_platform.workflow import phase_execution, runner as runner_module
 from risk_platform.agents.prompts import KNOWLEDGE_QUERY_SYSTEM_PROMPT
 from risk_platform.execution.tools import query_contract_digest
 from risk_platform.workflow import access
@@ -56,11 +58,11 @@ class Agent:
     def initial_plan(self, *_):
         pytest.fail("恢复不能重新规划或生成新 task_id")
 
-    def formulate_knowledge_query(self, task, *_args, **_kwargs):
+    def formulate_tool_call(self, task, *_args, **_kwargs):
         self.events.append("query:" + task.task_id)
         if self.query_failure:
             raise ValueError("invalid model output")
-        return KnowledgeSearchToolRequest(query="Query " + task.task_id, top_k=1)
+        return tool_call(KnowledgeSearchToolRequest(query="Query " + task.task_id, top_k=1))
 
     def observe_knowledge_round(self, plan, results):
         self.events.append("observation")
@@ -79,7 +81,7 @@ async def resources(url, agent, *, setup=False):
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with postgres_checkpointer(url, setup=setup) as saver:
-            runner = recovery.FirstRoundRecovery(agent, session_factory=sessions, checkpointer=saver)
+            runner = runner_module.InvestigationRunner(agent, session_factory=sessions, checkpointer=saver)
             yield sessions, saver, runner
     finally:
         await engine.dispose()
@@ -100,7 +102,7 @@ async def context(sessions, actor="A", permission=lambda *_: True, timeout=30, s
     async with sessions() as session:
         return await load_runtime_context(session, investigation_id="I"+suffix, round_id="R"+suffix,
             actor_id=actor, timeout_seconds=timeout,
-            tools=(KnowledgeSearchTool(KnowledgeExecutionContext(actor_id=actor, index_profile="parent-child-v1", scope={"model_id": "M"}, timeout_seconds=timeout), lambda *_: True),),
+            tools=(KnowledgeSearchTool(KnowledgeExecutionContext(actor_id=actor, index_profile="parent-child-v1", scope={"model_id": "M"}, timeout_seconds=timeout), lambda *_: True, session_factory=sessions),),
             authorize_resource=permission,
             action=InvestigationAction.READ if actor == "reader" else InvestigationAction.CONTINUE)
 
@@ -171,14 +173,14 @@ def test_persisted_first_run_uses_shared_loop_and_resume_reuses_results(database
 def test_fresh_and_interrupted_resume_use_same_explicit_invocation_contract(database, monkeypatch):
     agent = Agent()
     retrieval(monkeypatch, agent)
-    original, interrupted = recovery._phase, {"done": False}
-    async def interrupt(*args):
-        artifact = await original(*args)
+    original, interrupted = phase_execution._phase, {"done": False}
+    async def interrupt(*args, **kwargs):
+        artifact = await original(*args, **kwargs)
         if not interrupted["done"]:
             interrupted["done"] = True
             raise ProcessLost("已提交 Query，检查点节点尚未完成")
         return artifact
-    monkeypatch.setattr(recovery, "_phase", interrupt)
+    monkeypatch.setattr(phase_execution, "_phase", interrupt)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
@@ -205,7 +207,7 @@ def test_invalid_candidate_is_committed_as_query_failure_without_search(database
     def invalid(*_, **__):
         agent.events.append("invalid-query")
         return {"query": "q", "actor_id": "forged"}
-    agent.formulate_knowledge_query = invalid
+    agent.formulate_tool_call = invalid
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
@@ -293,15 +295,15 @@ def test_old_checkpoint_version_is_rejected_without_reexecuting(database, monkey
 def test_crash_after_phase_commit_before_node_checkpoint_reuses_exact_artifact(database, monkeypatch, stage):
     agent = Agent()
     retrieval(monkeypatch, agent)
-    original, crashed = recovery._phase, {"done": False}
-    async def crash(*args):
-        value = await original(*args)
+    original, crashed = phase_execution._phase, {"done": False}
+    async def crash(*args, **kwargs):
+        value = await original(*args, **kwargs)
         operation = args[2]
         if operation.operation_type == stage and not crashed["done"]:
             crashed["done"] = True
             raise ProcessLost("post-commit process lost")
         return value
-    monkeypatch.setattr(recovery, "_phase", crash)
+    monkeypatch.setattr(phase_execution, "_phase", crash)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
@@ -439,13 +441,13 @@ def test_checkpoint_result_corruption_fails_before_any_new_external_call(databas
 def test_lost_lock_connection_fences_old_worker_after_new_generation_finishes(database, monkeypatch):
     agent = Agent()
     retrieval(monkeypatch, agent)
-    base_search, claim_original, guards = knowledge.retrieve_dense_children, recovery._claim, []
+    base_search, claim_original, guards = knowledge.retrieve_dense_children, runner_module._claim, []
     @asynccontextmanager
     async def capture(*args, **kwargs):
         async with claim_original(*args, **kwargs) as invocation:
             guards.append(invocation.guard)
             yield invocation
-    monkeypatch.setattr(recovery, "_claim", capture)
+    monkeypatch.setattr(runner_module, "_claim", capture)
     async def scenario():
         entered, release, count = asyncio.Event(), asyncio.Event(), {"value": 0}
         async def search(*args, **kwargs):
@@ -547,7 +549,7 @@ def test_lock_connections_do_not_starve_single_connection_ledger_pool(database, 
             await seed(sessions, 1, suffix="A")
             await seed(sessions, 1, suffix="B")
             async with postgres_checkpointer(database, setup=True) as saver:
-                runner = recovery.FirstRoundRecovery(agent, session_factory=sessions, checkpointer=saver)
+                runner = runner_module.InvestigationRunner(agent, session_factory=sessions, checkpointer=saver)
                 a, b = await context(sessions, suffix="A"), await context(sessions, "B", suffix="B")
                 results = await asyncio.wait_for(asyncio.gather(runner.ainvoke(plan_id="PA", context=InvestigationInvocation(runtime=a)),
                     runner.ainvoke(plan_id="PB", context=InvestigationInvocation(runtime=b))), 30)
@@ -568,17 +570,18 @@ import asyncio, os, pytest
 from test_recovery_postgres import Agent, resources, context, retrieval
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow import recovery
+from risk_platform.workflow import phase_execution, runner as runner_module
 if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 agent = Agent()
 retrieval(pytest.MonkeyPatch(), agent)
-original = recovery._phase
-async def crash(*args):
-    value = await original(*args)
+original = phase_execution._phase
+async def crash(*args, **kwargs):
+    value = await original(*args, **kwargs)
     if args[2].operation_type == "KNOWLEDGE_EXECUTION" and args[2].task_id == "T0":
         os._exit(23)
     return value
-recovery._phase = crash
+phase_execution._phase = crash
 async def main():
     async with resources(os.environ["RECOVERY_TEST_DATABASE_URL"], agent) as (sessions, saver, runner):
         await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))

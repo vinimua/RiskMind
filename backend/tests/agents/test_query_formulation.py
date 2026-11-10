@@ -27,7 +27,7 @@ def test_query_is_structured_model_output_not_objective_fallback():
     request = agent.formulate_knowledge_query(task, planning, goal="背景调查", max_top_k=5)
     assert request.query != task.objective and request.top_k == 3
     payload = json.loads(calls[0]["messages"][1]["content"])
-    assert payload["objective"] == task.objective and payload["max_top_k"] == 5
+    assert payload["objective"] == task.objective and payload["tool_limits"]["knowledge_search"]["max_top_k"] == 5
     assert "不可信业务数据" in calls[0]["messages"][0]["content"]
     assert "task_id" not in payload and "actor_id" not in payload and "index_profile" not in payload
     assert "response_format" not in calls[0]
@@ -37,7 +37,7 @@ def test_query_is_structured_model_output_not_objective_fallback():
     assert calls[0]["tools"][0]["function"]["parameters"]["additionalProperties"] is False
 
 
-@pytest.mark.parametrize("extra", ["actor_id", "execution_id", "task_id", "collection", "index_profile"])
+@pytest.mark.parametrize("extra", ["actor_id", "execution_id", "task_id", "collection", "index_profile", "embedding_client", "milvus_client", "session_factory"])
 def test_model_cannot_add_trusted_fields(extra):
     agent, task, planning, _ = call(json.dumps({"query": "q", "top_k": 1, extra: "forged"}))
     with pytest.raises(ValidationError):

@@ -17,7 +17,7 @@ class PlanningRunRow(PayloadRow, Base):
         ForeignKeyConstraint(["investigation_id", "round_id"],
             ["investigation_rounds.investigation_id", "investigation_rounds.round_id"]),
         UniqueConstraint("run_id", "plan_id", "investigation_id", "round_id", name="uq_planning_identity"),
-        CheckConstraint("schema_version = 1", name="ck_planning_schema"),
+        CheckConstraint("schema_version IN (1,2)", name="ck_planning_schema"),
     )
 
 

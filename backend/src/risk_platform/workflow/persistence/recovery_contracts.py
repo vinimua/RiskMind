@@ -1,11 +1,9 @@
-"""8C 从不可变 Accepted Plan 开始恢复首轮，不恢复尚未接受的初始规划。"""
+"""持久化执行契约：运行身份、阶段产物与恢复策略。"""
 
 from typing import Literal
 
 from pydantic import Field
 
-from risk_platform.knowledge.contracts import KnowledgeFilters
-from risk_platform.knowledge.indexing.profiles import IndexProfile
 from .contracts import CommittedArtifact, Digest, Identity, LedgerContract
 
 
@@ -14,18 +12,23 @@ class PhaseArtifact(CommittedArtifact):
     schema_version: Literal[2] = 2
 
 
-class FirstRoundSpec(LedgerContract):
+class RunIdentity(LedgerContract):
+    """运行身份；阶段模型、提示词和工具配置不属于运行身份。"""
+
+    schema_version: Literal[2] = 2
     run_id: Identity
     investigation_id: Identity
     round_id: Identity
     plan_id: Identity
-    index_profile: IndexProfile
-    scope: KnowledgeFilters
-    max_top_k: int = Field(gt=0, strict=True)
-    query_model: Identity
-    query_prompt_digest: Digest
-    observation_model: Identity
-    observation_prompt_digest: Digest
+
+
+def read_run_identity(row) -> RunIdentity:
+    """只读取当前 v2 运行身份，并校验原文摘要。"""
+    from . import repository as ledger
+
+    if row.schema_version != 2:
+        raise ledger.LedgerIntegrityError("仅支持 v2 运行记录，旧版本不能恢复")
+    return ledger._read(row, RunIdentity)
 
 
 class RecoveryPolicy(LedgerContract):

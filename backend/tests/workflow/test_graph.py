@@ -1,4 +1,5 @@
 import asyncio
+from workflow_test_helpers import tool_call
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from workflow_test_helpers import run_business_nodes
@@ -26,8 +27,8 @@ class FakeInvestigationAgent:
     def initial_plan(self, _: InitialPlanningInput) -> InvestigationPlan:
         return self.plan
 
-    def formulate_knowledge_query(self, *_, **__):
-        return {"query": "历史标签成熟度导致指标低估的案例", "top_k": 3}
+    def formulate_tool_call(self, *_, **__):
+        return tool_call({"query": "历史标签成熟度导致指标低估的案例", "top_k": 3})
 
 
 def _graph(agent):
@@ -76,11 +77,12 @@ def test_single_persistent_topology() -> None:
     # 恢复模块只能提供执行机制，不能再构造自己的 StateGraph。
     import ast
     import inspect
-    from risk_platform.workflow import recovery
-    tree = ast.parse(inspect.getsource(recovery))
-    assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                   and node.func.id == "StateGraph" for node in ast.walk(tree))
-    assert not hasattr(recovery, "RecoveryState")
+    from risk_platform.workflow import recovery, runner, planning, phase_execution, run_guard, checkpoints
+    for module in (recovery, runner, planning, phase_execution, run_guard, checkpoints):
+        tree = ast.parse(inspect.getsource(module))
+        assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                       and node.func.id == "StateGraph" for node in ast.walk(tree))
+        assert not hasattr(module, "RecoveryState")
 
 
 def test_state_cannot_enable_retired_direct_execution() -> None:
@@ -125,3 +127,10 @@ def test_routing_uses_round_end_not_case_completion() -> None:
     assert _route_after_replanning({"round_complete": False, "investigation_status": "OPEN"}) == "continue"
     assert _route_after_replanning({"investigation_complete": True}) == "continue"
     assert replanning({}) == {"round_complete": True, "investigation_status": "OPEN"}
+
+
+def test_legacy_runner_import_is_the_same_implementation():
+    from risk_platform.workflow.recovery import FirstRoundRecovery
+    from risk_platform.workflow.runner import InvestigationRunner
+
+    assert FirstRoundRecovery is InvestigationRunner

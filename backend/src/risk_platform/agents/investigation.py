@@ -53,36 +53,47 @@ class InvestigationAgent:
             raise ValueError("本轮解释未完整返回")
         return KnowledgeObservationDraft.model_validate_json(choice.message.content)
 
-    def formulate_knowledge_query(
-        self, task: InvestigationTask, planning_input: InitialPlanningInput,
-        *, goal: str, max_top_k: int,
-    ):
-        """将任务意图转换为候选请求；可信身份、策略与物理集合不交给模型决定。"""
-        from risk_platform.execution.tools import tool_declarations, parse_tool_choice
-
-        if task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
-            raise ValueError("Query Formulation 只支持知识检索任务")
+    def formulate_tool_call(self, task, planning_input, *, goal, tools, tool_limits, memory_context=None):
+        """只看到本任务已绑定工具的公开声明与参数限制，不接受可信运行对象。"""
+        from risk_platform.execution.tools import parse_tool_choice
+        names = tuple(tool["function"]["name"] for tool in tools)
+        if not names or len(names) != len(set(names)):
+            raise ValueError("必须明确提供当前任务可用的工具")
         payload = {
             "investigation_context": json.loads(build_initial_planning_context(planning_input)),
             "goal": goal, "objective": task.objective,
-            "expected_result": task.expected_result, "max_top_k": max_top_k,
+            "expected_result": task.expected_result, "tool_limits": tool_limits,
         }
+        if memory_context is not None:
+            from risk_platform.memory.context import model_context
+            payload["historical_memory"] = model_context(memory_context)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": KNOWLEDGE_QUERY_SYSTEM_PROMPT},
                       {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            tools=tool_declarations(task.capability),
-            tool_choice="required",
-            parallel_tool_calls=False,
+            tools=tools, tool_choice="required", parallel_tool_calls=False,
         )
-        request = parse_tool_choice(response.choices[0], task.capability)
-        if request.top_k > max_top_k:
+        return parse_tool_choice(response.choices[0], task.capability, allowed_names=names)
+
+    def formulate_knowledge_query(
+        self, task: InvestigationTask, planning_input: InitialPlanningInput,
+        *, goal: str, max_top_k: int,
+    ):
+        """独立知识查询构造接口；workflow 使用通用 formulate_tool_call。"""
+        from risk_platform.execution.tools import tool_declarations
+        if task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
+            raise ValueError("Query Formulation 只支持知识检索任务")
+        call = self.formulate_tool_call(task, planning_input, goal=goal,
+            tools=tool_declarations(task.capability, names=("knowledge_search",)),
+            tool_limits={"knowledge_search": {"max_top_k": max_top_k}})
+        if call.arguments.top_k > max_top_k:
             raise ValueError("工具请求数量超过本次允许上限")
-        return request
+        return call.arguments
 
     def initial_plan(
         self,
         planning_input: InitialPlanningInput,
+        *, memory_context=None,
     ) -> InvestigationPlan:
         """Plan the knowledge needed for the first investigation round."""
 
@@ -91,6 +102,10 @@ class InvestigationAgent:
                 "初始计划生成需要 KNOWLEDGE_RETRIEVAL 能力,但可用能力里没有"
             )
 
+        context_payload = json.loads(build_initial_planning_context(planning_input))
+        if memory_context is not None:
+            from risk_platform.memory.context import model_context
+            context_payload["historical_memory"] = model_context(memory_context)
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -100,7 +115,7 @@ class InvestigationAgent:
                 },
                 {
                     "role": "user",
-                    "content": build_initial_planning_context(planning_input),
+                    "content": json.dumps(context_payload, ensure_ascii=False),
                 },
             ],
             response_format={"type": "json_object"},

@@ -1,6 +1,7 @@
 """7B：显式查询构造、顺序执行、7A 授权与任务关联；不实现 Observation。"""
 
 import asyncio
+from workflow_test_helpers import runtime_for, tool_call
 
 from risk_platform.execution import knowledge as registered_knowledge
 
@@ -37,13 +38,13 @@ class Agent:
     def initial_plan(self, _):
         return self.current["investigation_plan"]
 
-    def formulate_knowledge_query(self, task, planning_input, *, goal, max_top_k):
+    def formulate_tool_call(self, task, planning_input, *, goal, tools, tool_limits):
         self.events.append(("formulate", task.task_id))
         assert goal == "调查背景" and planning_input.user_query.model_id == "M"
-        assert max_top_k == 5
+        assert tool_limits["knowledge_search"]["max_top_k"] == 5
         if task.task_id == "T0" and self.failure:
             raise self.failure
-        return {"query": f"具体检索问题{task.task_id}", "filters": {}, "top_k": 2}
+        return tool_call({"query": f"具体检索问题{task.task_id}", "filters": {}, "top_k": 2})
 
 
 def context():
@@ -72,7 +73,7 @@ def test_real_7a_path_sequential_zero_hits_and_task_association(monkeypatch):
     original, events = state(), []
     empty_dependencies(monkeypatch, events)
     result = asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
-                                        execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                        runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     assert [e[0] for e in events] == ["formulate", "retrieve", "resolve", "formulate", "retrieve", "resolve"]
     assert [r.task_id for r in result["task_execution_results"]] == ["T0", "T1"]
     assert all(r.status == "SUCCEEDED" and r.payload.resolved.contexts == () for r in result["task_execution_results"])
@@ -88,7 +89,7 @@ def test_formulation_failure_no_tool_and_next_task_continues(monkeypatch, failur
     original, events = state(), []
     empty_dependencies(monkeypatch, events)
     result = asyncio.run(task_execution(original, investigation_agent=Agent(original, events, failure),
-                                        execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                        runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     first, second = result["task_execution_results"]
     assert first.error.code == code and first.payload is None
     assert "secret" not in first.model_dump_json()
@@ -99,10 +100,11 @@ def test_formulation_failure_no_tool_and_next_task_continues(monkeypatch, failur
 def test_candidate_cannot_supply_system_identity():
     original, events = state(1), []
     agent = Agent(original, events)
-    agent.formulate_knowledge_query = lambda *_, **__: {"query": "q", "top_k": 1, "actor_id": "forged"}
+    agent.formulate_tool_call = lambda *_, **__: tool_call({"query": "q", "top_k": 1, "actor_id": "forged"})
     result = asyncio.run(task_execution(original, investigation_agent=agent,
-                                        execution_context=context(), authorize=lambda *_: pytest.fail("非法请求不应鉴权"), execute_phase=run_phase))
-    assert result["task_execution_results"][0].status == "REJECTED"
+                                        runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: pytest.fail("非法请求不应鉴权")), execute_phase=run_phase))
+    assert result["task_execution_results"][0].status == "FAILED"
+    assert result["task_execution_results"][0].error.code == "QUERY_FORMULATION_INVALID"
     assert result["investigation_plan"].tasks[0].status == "FAILED"
 
 
@@ -122,7 +124,7 @@ def test_integrity_failure_is_failed_not_empty_success(monkeypatch):
     original, events = state(1), []
     empty_dependencies(monkeypatch, events, fail_resolution=True)
     result = asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
-                                        execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                        runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     assert result["task_execution_results"][0].error.category == "INTEGRITY"
     assert result["investigation_plan"].tasks[0].status == "FAILED"
 
@@ -132,7 +134,7 @@ def test_duplicate_ids_rejected_before_query():
     original["investigation_plan"].tasks[1].task_id = "T0"
     with pytest.raises(ValueError, match="唯一"):
         asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
-                                   execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                   runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     assert not events
 
 
@@ -140,7 +142,7 @@ def test_nonknowledge_task_rejected_without_query():
     original, events = state(1), []
     original["investigation_plan"].tasks[0].capability = CapabilityType.COMPUTATION
     result = asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
-                                        execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                        runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     assert not events and result["task_execution_results"][0].error.code == "UNSUPPORTED_CAPABILITY"
 
 
@@ -148,7 +150,7 @@ def test_cancellation_propagates():
     original, events = state(1), []
     agent = Agent(original, events, asyncio.CancelledError())
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(task_execution(original, investigation_agent=agent, execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+        asyncio.run(task_execution(original, investigation_agent=agent, runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
 
 
 def test_formulation_deadline_does_not_execute_tool():
@@ -158,10 +160,10 @@ def test_formulation_deadline_does_not_execute_tool():
     def slow(*_, **__):
         time.sleep(.04)
         return {"query": "q", "top_k": 1}
-    agent.formulate_knowledge_query = slow
+    agent.formulate_tool_call = slow
     trusted = context().model_copy(update={"timeout_seconds": .001})
-    result = asyncio.run(task_execution(original, investigation_agent=agent, execution_context=trusted,
-                                        authorize=lambda *_: pytest.fail("查询构造超时不得执行工具"), execute_phase=run_phase))
+    result = asyncio.run(task_execution(original, investigation_agent=agent, runtime_context=runtime_for(original["planning_input"], trusted, authorize=lambda *_: pytest.fail("查询构造超时不得执行工具")),
+                                         execute_phase=run_phase))
     assert result["task_execution_results"][0].error.code == "QUERY_FORMULATION_TIMEOUT"
 
 
@@ -178,5 +180,5 @@ def test_wrong_task_result_identity_not_written_to_state(monkeypatch):
     monkeypatch.setattr(registered_knowledge, "execute_knowledge_search", wrong)
     with pytest.raises(ValueError, match="身份不一致"):
         asyncio.run(task_execution(original, investigation_agent=Agent(original, events),
-                                   execution_context=context(), authorize=lambda *_: True, execute_phase=run_phase))
+                                   runtime_context=runtime_for(original["planning_input"], context(), authorize=lambda *_: True), execute_phase=run_phase))
     assert "task_execution_results" not in original

@@ -1024,3 +1024,57 @@ scope/index_profile/max_top_k/工具超时、独立知识授权和无模型范�
 只接受一次调用，不增加图节点、模型调用次数或自由 ReAct 工具循环；当前只有一个工具。
 工具声明和协议参数参与查询调用摘要，旧摘要运行不自动迁移。
 详见 [工具注册与模型选择](workflow-tool-registration.md)。
+
+
+## 通用任务入口的工具上下文隔离
+
+execute_node/task_execution 只接收 InvestigationRuntimeContext，不预取知识执行配置。
+工具列表按注册、任务 capability、本次可信绑定取交集；模型选择后的 ToolCall 保留工具名，
+由所选 handler 取得专用上下文和授权。通用资源 _authorize 不再隐式要求知识工具。
+现有持久化规格仍明确只支持知识阶段，其他工具名不能写入旧知识载荷。
+见 [通用任务执行边界](workflow-generic-task-execution.md)。
+
+
+## 工具运行依赖归属
+
+知识检索的 session_factory、embedding_client、milvus_client 由 KnowledgeSearchTool 按次绑定，
+所选知识 handler 自行读取。通用 task_execution/工具分派不透传知识客户端，
+graph 和 FirstRoundRecovery 只保留账本用途的 session_factory。
+引用不进入模型输入、State、checkpoint 或业务摘要，生命周期由应用管理。
+详见 [通用任务执行边界](workflow-generic-task-execution.md#10-知识客户端依赖下沉)。
+
+### Workflow 执行模块职责收敛
+
+正式持久化执行入口命名为 `runner.InvestigationRunner`；图内计划准备在 `planning.py`，阶段入账协议在 `phase_execution.py`，运行占用和 generation 在 `run_guard.py`，检查点对账在 `checkpoints.py`。唯一 topology 仍在 `graph.py`，唯一业务阶段实现在 `nodes.py`。旧 `recovery.FirstRoundRecovery` 仅兼容导出同一个类。此次不改变数据库 schema、稳定身份、摘要或事务边界。详见 [执行模块指南](workflow-execution-module-guide.md)。
+
+可信运行环境进一步统一为 `InvestigationInvocation.runtime`：`RunExecutionContext` 不再持有 context，规划、阶段事务与检查点校验显式接收 runtime；内部执行控制只保存规格、策略和 guard，包装层核对案件、轮次及运行身份。数据库与检查点协议不变。
+
+通用运行控制进一步收敛为 `RunSpec + RecoveryPolicy + RunGuard`。知识 scope/profile/top_k 仅由工具绑定提供；旧 FirstRoundSpec 仅作为知识账本兼容格式。规划输入摘要与占用号只在图内 prepare_plan 阶段建立，Runner 不再创建规划日志或携带规划字段。稳定 plan_id 可以预留，但已接受计划仍不可覆盖。
+
+### 运行身份与阶段协议最终分离
+
+当前 `RunExecutionContext` 只包含 `identity / policy / guard`，旧 RunSpec 已移除。阶段模型与协议在对应 Operation 登记；已选历史按原协议复用，未登记的后续阶段可使用新配置，已开始且未提交的阶段不允许静默换协议。0008 迁移支持纯身份运行记录和独立规划输入 v2，v1 历史只读投影、原文与摘要不覆盖。以 [执行模块指南](workflow-execution-module-guide.md) 为当前边界说明。
+
+### 旧运行与规划契约移除
+
+已移除旧运行规格类、旧规划规格类及对应 v1 投影逻辑。运行身份与规划输入只支持 v2；遇到 v1 或未知版本明确拒绝，不解析为当前格式。迁移链、数据库历史记录及 Operation / Result 的既有版本协议不变。旧运行/规划数据不再支持自动恢复。
+
+
+## 案件记忆模块审阅入口
+
+案件记忆由已提交 Observation 确定性派生，单独保存不可变版本；规划与工具请求生成使用按阶段固定的上下文快照。完整设计、事务边界、测试入口和未来聊天/压缩/长期记忆治理边界见 [案件记忆设计](investigation-memory-design.md)。这不代表已实现自动多轮 Replanning、LLM 摘要或长期经验审批。
+
+
+### 通用记忆与调查适配边界
+
+MemoryItem / ContextEntry / AgentContext 已支持类型化调查和聊天来源；案件读取及持久化仍由专用适配完成。详见 [通用记忆解耦](generic-memory-refactor.md)。聊天存储和 API 尚未实现，跨会话/案件混装须等待明确的关联授权规则。
+
+
+### 记忆结构简化
+
+当前改为 MemoryScope、MemoryContent、MemoryRecord、AgentContext、ContextSnapshot 五类核心对象。分类正文用列表保存，来源集中到记忆记录，删除逐条 ContextEntry 包装。预算不足整条省略，恢复仍核验来源与原上下文。最新调用链、格式迁移与边界见 [记忆模块审阅指南](investigation-memory-design.md)。
+
+
+## 告警与聊天应用入口
+
+入口实现、调用链、授权配置和当前限制见 [入口审阅指南](entrypoints-guide.md)。两个调查触发入口共用唯一持久化 Runner；普通聊天不隐式启动调查。

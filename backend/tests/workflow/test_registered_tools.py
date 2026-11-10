@@ -10,6 +10,7 @@ from risk_platform.execution import knowledge, tools
 from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.workflow.contracts import CapabilityType
 from test_first_round_execution import state, context
+from workflow_test_helpers import runtime_for
 from test_observation import execution
 
 
@@ -39,7 +40,8 @@ def test_unregistered_or_mismatched_tool_never_calls_handler(monkeypatch, name, 
         pytest.fail("未知或错能力工具不能进入 handler")
     monkeypatch.setattr(knowledge, "execute_knowledge_search", forbidden)
     task = state(1)["investigation_plan"].tasks[0].model_copy(update={"capability": CapabilityType(capability)})
-    result = asyncio.run(tools.execute_registered_tool(name, task, {"query": "q", "top_k": 1}))
+    result = asyncio.run(tools.execute_registered_tool(name, task, {"query": "q", "top_k": 1},
+        runtime_context=runtime_for(state()["planning_input"], context())))
     assert result.status == "REJECTED" and result.error.code == code and result.payload is None
 
 
@@ -50,8 +52,12 @@ def test_registered_dispatch_delegates_to_existing_adapter(monkeypatch):
         return expected
     monkeypatch.setattr(knowledge, "execute_knowledge_search", adapter)
     task, request, trusted = state(1)["investigation_plan"].tasks[0], {"query": "q", "top_k": 1}, context()
-    result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, request, context=trusted))
-    assert result is expected and seen == [(task, request, {"context": trusted})]
+    result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, request,
+        runtime_context=runtime_for(state()["planning_input"], trusted)))
+    assert result is expected and len(seen) == 1
+    assert seen[0][:2] == (task, request)
+    assert seen[0][2]["context"] == trusted
+    assert seen[0][2]["authorize"](trusted.actor_id, "knowledge:search", trusted) is True
 
 
 def test_registration_does_not_bypass_authorization(monkeypatch):
@@ -59,7 +65,7 @@ def test_registration_does_not_bypass_authorization(monkeypatch):
         pytest.fail("权限拒绝不能检索")
     monkeypatch.setattr(knowledge, "retrieve_dense_children", forbidden)
     result = asyncio.run(tools.execute_registered_tool("knowledge_search", state(1)["investigation_plan"].tasks[0],
-        {"query": "q", "top_k": 1}, context=context(), authorize=lambda *_: False))
+        {"query": "q", "top_k": 1}, runtime_context=runtime_for(state()["planning_input"], context(), authorize=lambda *_: False)))
     assert result.status == "REJECTED" and result.error.code == "TOOL_NOT_AUTHORIZED"
 
 
@@ -68,3 +74,28 @@ def test_contract_digest_includes_tool_schema_and_description(monkeypatch):
     modified = replace(tools.KNOWLEDGE_SEARCH, description="不同工具说明")
     monkeypatch.setattr(tools, "TOOL_DEFINITIONS", MappingProxyType({modified.name: modified}))
     assert tools.query_contract_digest("prompt") != original
+
+
+@pytest.mark.parametrize("actor", ["A", "B"])
+def test_knowledge_dependencies_are_resolved_from_current_binding(monkeypatch, actor):
+    from dataclasses import replace
+    from test_runtime import make_runtime
+    task = state(1)["investigation_plan"].tasks[0]
+    sessions, embedder, milvus = object(), object(), object()
+    runtime = make_runtime(state()["planning_input"], context().model_copy(update={"actor_id": actor}))
+    binding = replace(runtime.tools[0], session_factory=sessions, embedding_client=embedder, milvus_client=milvus)
+    runtime = replace(runtime, tools=(binding,))
+    async def adapter(task, request, **options):
+        assert options["context"].actor_id == actor
+        assert options["session_factory"] is sessions
+        assert options["embedding_client"] is embedder
+        assert options["milvus_client"] is milvus
+        return execution(empty=True)
+    monkeypatch.setattr(knowledge, "execute_knowledge_search", adapter)
+    result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, {"query": "q", "top_k": 1}, runtime_context=runtime))
+    assert result.status == "SUCCEEDED"
+    # 不可序列化的客户端不能混入模型声明或已有审计上下文。
+    import json
+    json.dumps(tools.tool_declarations(task.capability))
+    json.dumps(binding.execution.model_dump(mode="json"))
+    assert "embedding_client=" not in repr(binding) and "session_factory=" not in repr(binding)

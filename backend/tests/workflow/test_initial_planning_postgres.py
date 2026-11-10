@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 
 from risk_platform.workflow import recovery
+from risk_platform.workflow import planning as planning_module
 from risk_platform.workflow.contracts import CapabilityType, InvestigationPlan, InvestigationTask, TaskStatus
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.persistence import repository as ledger
@@ -75,14 +76,14 @@ def test_committed_candidate_or_acceptance_survives_missing_node_checkpoint(data
     agent = Planner()
     retrieval(monkeypatch, agent)
     name = "_planning_candidate" if boundary == "candidate" else "prepare_plan"
-    original, crashed = getattr(recovery, name), {"done": False}
+    original, crashed = getattr(planning_module, name), {"done": False}
     async def interrupt(*args, **kwargs):
         result = await original(*args, **kwargs)
         if not crashed["done"]:
             crashed["done"] = True
             raise ProcessLost("planning phase committed before node checkpoint")
         return result
-    monkeypatch.setattr(recovery, name, interrupt)
+    monkeypatch.setattr(planning_module, name, interrupt)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed_round(sessions)
@@ -280,11 +281,11 @@ def test_multiple_accepted_plans_are_not_silently_selected(database):
 
 def test_acceptance_cannot_bind_different_plan_content_to_committed_candidate(database, monkeypatch):
     agent = Planner()
-    original = recovery._planning_candidate
-    async def interrupt(*args):
-        result = await original(*args)
+    original = planning_module._planning_candidate
+    async def interrupt(*args, **kwargs):
+        result = await original(*args, **kwargs)
         raise ProcessLost("candidate committed")
-    monkeypatch.setattr(recovery, "_planning_candidate", interrupt)
+    monkeypatch.setattr(planning_module, "_planning_candidate", interrupt)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed_round(sessions)
@@ -316,13 +317,14 @@ def test_actual_process_exit_after_candidate_commit_resumes_without_replanning(d
 import asyncio, os
 from test_initial_planning_postgres import Planner, resources, call
 from risk_platform.workflow import recovery
+from risk_platform.workflow import planning as planning_module
 if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-original = recovery._planning_candidate
-async def exit_after_candidate(*args):
-    await original(*args)
+original = planning_module._planning_candidate
+async def exit_after_candidate(*args, **kwargs):
+    await original(*args, **kwargs)
     os._exit(23)
-recovery._planning_candidate = exit_after_candidate
+planning_module._planning_candidate = exit_after_candidate
 async def main():
     async with resources(os.environ["PLANNING_TEST_DATABASE_URL"], Planner()) as (sessions, saver, runner):
         await call(runner, sessions)
@@ -337,4 +339,33 @@ asyncio.run(main())
         async with resources(database, agent) as (sessions, saver, runner):
             assert (await call(runner, sessions, actor="B"))["round_complete"]
             assert "initial-plan" not in agent.events
+    asyncio.run(scenario())
+
+
+def test_planning_journal_and_candidate_start_only_after_entering_graph(database, monkeypatch):
+    agent = Planner()
+    retrieval(monkeypatch, agent)
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed_round(sessions)
+            original = runner._graph.ainvoke
+            entered = []
+            async def capture(initial, *args, context, **kwargs):
+                async with sessions() as session:
+                    assert list(await session.scalars(select(PlanningRunRow))) == []
+                    assert list(await session.scalars(select(PlanningAttemptRow))) == []
+                    assert list(await session.scalars(select(AcceptedPlanRow))) == []
+                assert agent.events == []
+                assert not hasattr(context.execution, "planning_spec")
+                assert not hasattr(context.execution, "planning_claim_id")
+                entered.append(True)
+                return await original(initial, *args, context=context, **kwargs)
+            monkeypatch.setattr(runner._graph, "ainvoke", capture)
+            result = await call(runner, sessions)
+            assert entered == [True]
+            assert result["round_complete"] is True
+            assert agent.events[0] == "initial-plan"
+            async with sessions() as session:
+                assert (await session.scalars(select(PlanningRunRow))).one() is not None
+                assert (await session.scalars(select(PlanningAttemptRow))).one().status == "COMMITTED"
     asyncio.run(scenario())

@@ -1,5 +1,8 @@
 # 通用可信执行环境与知识查询工具
 
+> 当前任务执行入口的进一步解耦见 [通用任务执行边界](workflow-generic-task-execution.md)。
+> 通用资源授权不要求知识绑定；知识账本和知识 handler 分别保留专用校验。
+
 ## 1. 本次改变解决什么问题
 
 原来的 InvestigationRuntimeContext 直接保存 KnowledgeExecutionContext、authorize_knowledge
@@ -73,6 +76,7 @@ from risk_platform.workflow.runtime import InvestigationAction
 from risk_platform.workflow.invocation import InvestigationInvocation
 
 # actor_id 必须由应用认证确定，下面的策略函数必须由应用实现。
+# embedder / milvus 由可信应用创建并管理生命周期，不由模型构造。
 knowledge = KnowledgeSearchTool(
     execution=KnowledgeExecutionContext(
         actor_id=actor_id,
@@ -82,6 +86,9 @@ knowledge = KnowledgeSearchTool(
         timeout_seconds=20,
     ),
     authorize=knowledge_policy,
+    session_factory=sessions,
+    embedding_client=embedder,
+    milvus_client=milvus,
 )
 async with sessions() as session:
     context = await load_runtime_context(

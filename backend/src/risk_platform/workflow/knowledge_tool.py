@@ -5,7 +5,7 @@
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 from risk_platform.execution.contracts import KnowledgeExecutionContext
@@ -20,6 +20,11 @@ class KnowledgeSearchTool:
     execution: KnowledgeExecutionContext
     authorize: Callable[[str, str, KnowledgeExecutionContext], bool]
     allow_unscoped: bool = False
+    # 运行依赖只属于工具；不进入请求、业务摘要、State 或 checkpoint。
+    # 仅保存引用，不在构图/绑定时创建连接；生命周期由可信应用管理。
+    session_factory: Callable | None = field(default=None, kw_only=True, repr=False, compare=False)
+    embedding_client: object | None = field(default=None, kw_only=True, repr=False, compare=False)
+    milvus_client: object | None = field(default=None, kw_only=True, repr=False, compare=False)
 
     def validate_binding(self, actor_id: str, resource: InvestigationResource) -> None:
         """知识工具必须绑定同一 actor 和案件模型；无模型范围必须显式许可。"""

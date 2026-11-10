@@ -60,7 +60,7 @@ async def load_runtime_context(session, *, investigation_id, round_id, actor_id,
 
 
 async def _bound_context(session, context, action):
-    trusted = knowledge_execution(context, action)
+    trusted = check_runtime(context, action)
     current = await load_runtime_context(session, investigation_id=context.investigation.investigation_id,
         round_id=context.round.round_id, actor_id=context.actor_id, tools=context.tools,
         authorize_resource=context.authorize_resource, action=action, timeout_seconds=context.timeout_seconds)
@@ -70,7 +70,15 @@ async def _bound_context(session, context, action):
 # 不过，_bound_context() 不只调用权限函数，它还核对：
 # 案件与轮次是否匹配；
 # 传入的案件事实是否与 PostgreSQL 记录一致；
-# 当前知识工具绑定的 actor、模型范围是否正确
+# 已配置工具的身份、资源归属是否正确（不要求存在知识绑定）
+
+
+async def _knowledge_bound_context(session, context, action):
+    """当前知识账本专用适配，不再由通用资源授权隐式要求知识工具。"""
+    await _bound_context(session, context, action)
+    return knowledge_execution(context, action)
+
+
 def _belongs(value, context):
     if (value.investigation_id, value.round_id) != (context.investigation.investigation_id, context.round.round_id):
         raise InvestigationAccessError("不能跨调查或轮次访问操作")
@@ -124,7 +132,7 @@ async def _check_business(session, value, trusted, *, continuing):
 
 
 async def register_authorized_operation(session, value: BusinessOperationInput, *, context):
-    trusted = await _bound_context(session, context, InvestigationAction.CONTINUE)
+    trusted = await _knowledge_bound_context(session, context, InvestigationAction.CONTINUE)
     value = BusinessOperationInput.model_validate_json(value.model_dump_json())
     _belongs(value, context)
     await _check_business(session, value, trusted, continuing=True)
@@ -133,7 +141,7 @@ async def register_authorized_operation(session, value: BusinessOperationInput, 
 
 
 async def start_authorized_attempt(session, key: str, attempt_id: str, *, context, retry=False):
-    trusted = await _bound_context(session, context, InvestigationAction.CONTINUE)
+    trusted = await _knowledge_bound_context(session, context, InvestigationAction.CONTINUE)
     row = await session.get(OperationRow, key)
     if row is None:
         raise ledger.LedgerIntegrityError("操作尚未登记")
@@ -147,7 +155,7 @@ async def start_authorized_attempt(session, key: str, attempt_id: str, *, contex
 
 
 async def read_operation_history(session, expected: BusinessOperationInput, *, context):
-    trusted = await _bound_context(session, context, InvestigationAction.READ)
+    trusted = await _knowledge_bound_context(session, context, InvestigationAction.READ)
     expected = BusinessOperationInput.model_validate_json(expected.model_dump_json())
     _belongs(expected, context)
     await _check_business(session, expected, trusted, continuing=False)
@@ -174,3 +182,22 @@ async def read_operation_history(session, expected: BusinessOperationInput, *, c
         output.append(AttemptFact(attempt.attempt_id, attempt.attempt_number, attempt.status, attempt.resolution_code,
                                   attempt.started_at, attempt.ended_at, attempt.actor_id, attribution, artifact))
     return tuple(output)
+
+
+async def authorize_run(session, context):
+    """加载 canonical 归属并分别检查 CONTINUE 与 READ；二者不能互相推出。
+
+    只有 READ：允许查看，但不能继续运行；只有 CONTINUE：仍不满足读取历史的权限。
+    持久化执行需要两者都明确通过，不因检查顺序而赋予另一项权限。
+    """
+    # 顺序不赋予权限包含关系：恢复读取和继续始终分别显式检查。
+    await _bound_context(session, context, InvestigationAction.CONTINUE)
+    return await _bound_context(session, context, InvestigationAction.READ)
+# 数据库外键只能保证写入记录之间的关联合法，不能单独保证“本次调用者提供的 runtime 就对应这些记录”，因此调用边界仍需要核对。
+
+# 不过，“归属校验有必要”不等于“当前所有重复读取都必要”：
+# - 入口及恢复时，加载并核对数据库正式记录，很有价值。
+# - 等待模型后，重新检查当前权限有价值。
+# - 同一事务中反复加载同一案件、轮次，通常可以合并。
+# - 如果案件、轮次记录已被保证不可变，后续是否每次都重读，应按明确的信任边界决定。
+# 所以这项保护应该保留；当前 authorize_run() 把归属校验与权限检查绑在一起，确实容易造成重复，也增加了阅读成本。它们可以在实现上分清，不能仅因为函数叫“鉴权”，就认定其中每次查询都不可省。

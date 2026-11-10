@@ -1,474 +1,351 @@
-# prepare_plan：事务、并发控制、鉴权与恢复场景详解
+# prepare_plan：设计、代码、事务与恢复讨论整理
 
-本文按当前代码整理，帮助逐段审阅 `prepare_plan()`。只解释已有机制，不新增功能。
+本文按当前实现整理讨论，解释已有机制；本文没有修改业务行为或新增恢复能力。
 
-## 1. 阅读入口与职责
+## 1. 函数究竟做什么
 
-| 文件 | 重点对象 | 作用 |
+`prepare_plan()` 保证任务执行节点得到一份已经正式接受、可靠保存的计划，然后返回 State 更新。
+
+```text
+尚未绑定正式执行代次
+→ 取得可靠候选 → 正式接受 → 加载正式计划
+
+已经绑定正式执行代次
+→ 直接加载正式计划
+```
+
+这里没有独立意图识别。当前调用方已经决定发起或继续调查，才进入 Runner。普通问答、查看进度、发起调查的统一意图分流尚未实现，也不属于计划接受事务。
+
+## 2. 对应代码在哪里
+
+| 文件 | 重点函数 | 职责 |
 |---|---|---|
-| `../backend/src/risk_platform/workflow/graph.py` | `plan_node` | 唯一图的 prepare_plan 节点 |
-| `../backend/src/risk_platform/workflow/recovery.py` | `FirstRoundRecovery.ainvoke / _claim` | 入口鉴权、稳定运行身份、获取运行权 |
-| 同上 | `prepare_plan / _planning_candidate` | 准备候选、正式接受、加载计划 |
-| 同上 | `_authorize / _ClaimGuard / _bind_execution_run` | 权限、持锁检查、运行代次 |
-| `../backend/src/risk_platform/workflow/access.py` | `_bound_context / load_runtime_context` | 加载 canonical 案件/轮次并检查归属 |
-| `../backend/src/risk_platform/workflow/runtime.py` | `check_runtime` | 通用可信身份与资源授权 |
-| `../backend/src/risk_platform/workflow/knowledge_tool.py` | 知识工具绑定 | 当前首轮知识流程所需的工具配置与独立授权 |
-| `../backend/src/risk_platform/workflow/persistence/planning_repository.py` | `history / start / settle / validate` | 规划日志与候选校验 |
-| `../backend/src/risk_platform/workflow/persistence/planning_models.py` | 三张规划表 | 身份、尝试、接受来源的数据库约束 |
+| [runner.py](../backend/src/risk_platform/workflow/runner.py) | `InvestigationRunner.ainvoke()` | 入口授权、身份、运行锁、检查点 |
+| [graph.py](../backend/src/risk_platform/workflow/graph.py) | `plan_node()` | 唯一 LangGraph 的计划节点 |
+| [planning.py](../backend/src/risk_platform/workflow/planning.py) | `prepare_plan()`、`_planning_candidate()` | 候选生成/复用、正式接受、加载 |
+| [investigation.py](../backend/src/risk_platform/agents/investigation.py) | `initial_plan()` | 模型生成草案，转成 InvestigationPlan |
+| [planning_repository.py](../backend/src/risk_platform/workflow/persistence/planning_repository.py) | `register/history/start/settle/candidate/validate` | 规划输入、尝试及候选的数据库操作 |
+| [run_guard.py](../backend/src/risk_platform/workflow/run_guard.py) | `_claim()`、`RunGuard`、`_bind_execution_run()` | 运行权与执行代次 |
+| [access.py](../backend/src/risk_platform/workflow/access.py) | `authorize_run()` | canonical 归属及 READ、CONTINUE 授权 |
+| [planning_models.py](../backend/src/risk_platform/workflow/persistence/planning_models.py) | 三张规划表 | 规划输入、尝试、接受来源约束 |
 
-文件路径从本文所在 docs 目录解析。表中的路径用来定位代码，不表示本文实现了另一套编排器。
+## 3. 术语对照
 
-一句话目标：为任务执行提供一份已经正式接受、可靠保存、归属正确的计划；能复用就不重新生成。
-
-## 2. 先把五种不同检查分开
-
-| 问题 | 机制 | 不是在做什么 |
+| 对象或变量 | 是什么 | 不代表什么 |
 |---|---|---|
-| 当前这个人能读/继续这个案件吗？ | `_authorize()` | 不是检查模型答案质量 |
-| 当前输入属于正确案件和轮次吗？ | canonical 记录比较、FK、稳定规格 | 不是只比较一个字符串 ID |
-| 当前进程还独占执行这个 run 吗？ | session advisory lock 与 `check_lock()` | 不是用户权限 |
-| 当前执行者的代次是否过期？ | `guard.check(session)` | 不是任务数量或模型调用次数 |
-| 这份候选确实已可靠保存并合法了吗？ | COMMITTED、摘要、结构、来源关联 | 不是证明计划一定能查清根因 |
+| `RunIdentity` | run / investigation / round / plan ID | 有预留 plan_id 不代表已有计划正文 |
+| `spec: PlanningInput` | 规划模型、输入和提示词摘要，附带运行归属 | 不是模型生成的任务计划 |
+| `PlanningCandidate` | 候选计划包装 | 尚未成为正式执行计划 |
+| `attempt_id` | 一次规划尝试编号 | 不是线程 ID、task_id 或 plan_id |
+| `accepted` | 已校验、准备接受的 AcceptedPlan 类型对象 | 变量名不证明已经正式接受入库 |
+| `fact` | 数据库里的规划尝试记录 | 不是一条新生成的计划 |
+| `expected` | 从数据库候选重新校验构造的 AcceptedPlan 对象 | 不是重新调用模型的结果 |
+| `COMMITTED` | 候选产物已经可靠保存 | 不等于正式接受，更不等于调查完成 |
 
-`generation == 0` 只选择流程分支，不执行鉴权。读取 `invocation.guard` 也不会自动检查锁。
+$$
+\text{Candidate COMMITTED} \not\Rightarrow \text{Plan Accepted}
+$$
 
-## 3. 上下文、身份与代次
+## 4. 从应用到 prepare_plan
 
-外部上下文 `InvestigationInvocation` 分为 runtime 和 execution。execution 由 runner 获得运行权后填入，
-不是调用方自报的权限。内部 `_Invocation` 保存 context、spec、policy、guard、planning_spec、planning_claim_id。
+```text
+可信应用提供 runtime
+→ Runner 鉴权、确定运行身份、取得运行会话锁
+→ 创建 RunExecutionContext(identity, policy, guard)
+→ 包装为 InvestigationInvocation(runtime, execution)
+→ 调用唯一 LangGraph
+→ plan_node 调用 prepare_plan
+```
 
-### 3.1 guard 保存什么
+`prepare_plan` 的 `invocation` 参数是内部 RunExecutionContext，不是外层 InvestigationInvocation。`runtime` 则作为显式参数提供。
 
 ```python
-class _ClaimGuard:
-    connection: object  # 专用持锁连接
-    backend_pid: int    # 该 PostgreSQL 会话对应的后端进程 ID
-    run_id: str
-    generation: int
+async def prepare_plan(state, invocation, *, sessions, agent, runtime):
 ```
 
-- `check_lock()`：检查连接未失效、后端 PID 一致且当前会话仍持有 advisory lock。
-- `check(session)`：先检查锁，再 `SELECT ... FOR UPDATE` 读取正式 Run，比较 current_generation。
-- 当前 check_lock 的 SQL 检查“该专用会话持有 advisory lock”，没有逐项比对精确 lock key；
-  它依赖该连接只用于本次运行锁、不被其他用途复用的实现约束。
+- `state`：当前业务状态；可信调查输入来自 runtime 中的正式调查记录。
+- `invocation`：运行身份、恢复策略和运行护栏。
+- `sessions`：数据库会话工厂。
+- `agent`：初始规划 Agent。
+- `runtime`：当前身份、案件、轮次、授权入口和工具绑定。
+- `*`：后面的参数必须使用名称传入。
 
-### 3.2 generation 何时变为 1、2
+## 5. generation 不负责查候选
 
 ```python
-generation = (row.current_generation or 0) + 1
-row.current_generation = generation
-await session.flush()
+if invocation.guard.generation == 0:
 ```
 
-这是 `_bind_execution_run()` 中的应用代码，不是数据库自动递增触发器。
-flush 将修改发送至数据库，但只有外围事务 commit 后才正式生效；回滚则不生效。
-
-- 没有正式计划时，guard.generation 先设为 0，它是内存启动标记，不能等同于已存在的 Run 行。
-- 第一次正式接受计划并绑定执行运行：通常从 0 增加到 1。
-- 已有正式计划的后续运行，在 `_claim()` 中绑定新执行代次，例如 1 增加到 2。
-- 连续调用模型、进入下一个节点不会自动递增。
-- 连接断开只导致锁在数据库确认会话结束后释放，不会自动把 generation 改为 2。
-- 只有新执行者成功绑定并提交，代次才更新。
-
-特别注意：正式接受前，A 与 B 的 guard 都可能是 generation=0。
-这个阶段靠运行锁和 planning_claim_id 区分执行者，不靠递增 generation 保护。
-不能把正式运行中的“1→2”示例直接套在尚未接受计划的阶段。
-
-## 4. 鉴权来源与实际调用链
+它表示当前尚未绑定正式执行代次，需要进入计划准备、接受流程。不表示没有运行锁，也不表示没有候选。
 
 ```text
-_authorize(session, context)
-  ├── _bound_context(..., CONTINUE)
-  └── _bound_context(..., READ)
+generation == 0
+├─ 没有候选：生成
+├─ 有 COMMITTED 候选：复用
+└─ 有旧未完成尝试：按恢复规则与策略处理
 ```
 
-READ 与 CONTINUE 分别显式要求 True；可读不代表可以创建新 Attempt。
+是否存在候选，由 `_planning_candidate()` 查询 `planning.history(session, run_id)` 后判断。`planning_specification()` 本身不查询数据库。
 
-`_bound_context()` 当前会先取得当前知识执行上下文，再从 PG 加载 Investigation/Round，
-并比较它们与调用方上下文中的 canonical 记录是否一致。当前账本访问适配仍面向知识流程，
-虽然通用 Runtime 已不再包含知识专用字段，但不能宣称整个首轮 runner 已支持其他工具。
+generation 大于 0 时，当前调用已经绑定正式执行代次，直接加载已有正式计划。
 
-| 信息 | 来源 |
-|---|---|
-| Investigation / Round 存在性、内容、归属 | PostgreSQL canonical 记录 |
-| actor_id | 已认证的可信应用 |
-| READ / CONTINUE 判定 | 应用提供的 authorize_resource 回调 |
-| scope / profile / top_k / 工具预算 | 可信应用安装的 KnowledgeSearchTool |
-| knowledge:search 权限 | 工具独立 authorize 回调，在实际工具调用时检查 |
-| 运行锁、正式运行代次 | PostgreSQL 与当前持锁连接 |
+## 6. planning_specification 的用途
 
-prepare_plan 中 `_authorize()` 并不等于执行 knowledge:search 授权回调。
-它检查资源权限、工具配置归属及 canonical 事实；后续真实知识工具调用仍需独立授权。
+它构造 PlanningInput，记录：运行归属、初始规划模型、调查输入摘要、初始规划提示词摘要。
 
-### 4.1 当前确实存在的重复
+目的：恢复时判断旧候选是否仍对应同一份规划输入。实际登记、比较发生在 `planning.register()`。
 
-一次 `_bound_context()` 中，knowledge_execution 会校验传入上下文并调用资源授权；
-load_runtime_context 加载记录后又调用 check_runtime。随后 READ 路径再次做一遍类似工作。
-因此同一 action 的授权回调可能重复调用，类型/绑定检查也重复；session.get 是否实际发出 SQL
-还受到 SQLAlchemy 当前 Session identity map 等因素影响，不能按函数调用次数推算 SQL 次数。
+$$
+D_{input}=\operatorname{SHA256}(\operatorname{CanonicalJSON}(input))
+$$
 
-后续可在一个短事务内加载和核对一次 canonical 事实，再分别判断 READ 和 CONTINUE。
-但不应把首次授权结果跨模型等待缓存到整个运行结束。本文只记录优化点，不修改实现。
+$$
+D_{prompt}=\operatorname{SHA256}(\operatorname{UTF8}(prompt))
+$$
 
-### 4.2 重检权限为何有用，又为何不等于原子撤权
+摘要用于比较输入变化，不是原文、自动防篡改系统或模型输出一致性的保证。列表顺序和业务内容变化仍可能改变摘要。
 
-有效拦截：
+这只固定已登记的初始规划阶段输入，不固定后续 Query、Observation 的模型配置。
+
+## 7. accepted 如何得到
+
+首次生成：
 
 ```text
-00 秒：入口授权通过
-05 秒：管理员撤销 CONTINUE
-20 秒：模型返回
-21 秒：保存前重新检查，拒绝写入
-```
-
-仍然存在的窗口：
-
-```text
-20.000 秒：权限回调返回 True
-20.001 秒：外部权限系统撤权
-20.002 秒：本地 PG 提交
-```
-
-Python 回调在事务代码块内执行，不代表外部权限系统加入这个 PG 事务。
-当前保证“在关键边界重新检查”，不保证撤权和提交全局线性一致。
-若未来要求严格撤权生效顺序，需要权限版本/锁/统一事务等额外设计，当前没有实现。
-
-## 5. 一条完整正常路径：四个写事务加最后读取
-
-以下 T1/T2/T3/T4 是本文局部编号；此前 `_claim()` 自己也有事务，不能理解为整个 runner 仅四次事务。
-复用已有候选时会跳过 T2、模型调用和 T3；已有正式执行运行时直接加载正式计划。
-
-```text
-runner 认证和获取运行锁，构造内部调用上下文
-    ↓
-prepare_plan：generation == 0 ?
-    ├── 否 → load_accepted_plan
-    └── 是
-         T1：读规划历史 / 复用候选 / 旧 STARTED → UNCERTAIN
-          ↓ commit
-         T2：检查重试策略 / 新建 STARTED 与 actor、claim 归因
-          ↓ commit
-         事务外：调用模型、构造计划、确定性校验
-          ↓
-         T3：候选正文 + 摘要 + Attempt.COMMITTED
-          ↓ commit
-         T4：正式计划 + 接受来源 + 正式 Run/Claim/generation
-          ↓ commit
-         更新内存 guard.generation
-          ↓
-         load_accepted_plan：新 Session 读取正式计划
-```
-
-### 5.1 T1：处理历史
-
-每个写事务开始时都重新鉴权、check_lock。planning.history 使用 FOR UPDATE 锁住已有尝试行。
-若找到 COMMITTED，验证候选摘要和契约后复用；若找到 STARTED：
-
-- claim_id 与当前 planning_claim_id 相同：当前尝试尚未完成，拒绝重复进入。
-- claim_id 不同：在当前确实已取得运行锁的前提下，将旧尝试结算 UNCERTAIN。
-
-FOR UPDATE 只锁查询到的已有行。空结果不等于锁住“未来可能插入的行”，首次创建竞争由运行锁和唯一约束共同约束。
-
-### 5.2 T2：先记录 STARTED
-
-有 UNCERTAIN 必须允许 retry_uncertain；有 FAILED 必须允许 retry_failed_attempts。
-符合策略才创建新 Attempt，记录 actor、工具上下文归因、attempt_number、planning_claim_id。
-不覆盖旧 Attempt。STARTED 提交成功后才允许发出模型调用。
-
-### 5.3 事务外生成与校验
-
-```text
-nodes.initial_planning
-→ InvestigationAgent.initial_plan
-→ 模型返回完整 JSON
-→ 构造 InvestigationPlan
+_planning_candidate()
+→ nodes.initial_planning()
+→ agent.initial_plan()
+→ InvestigationPlan
 → PlanningCandidate
-→ planning.validate
+→ planning.validate()
+→ 内存 AcceptedPlan 对象
 ```
 
-校验目标/任务目标/expected_result 非空、能力允许、任务非空、任务 ID 唯一、初始状态 PENDING 等。
-案件/轮次/plan_id 从稳定 spec 绑定，不由模型决定。当前没有语义质量证明。
+`validate()` 检查目标、预期结果、任务能力等规则，并绑定可信的案件、轮次和计划身份；它不写正式计划表。
 
-此处使用 asyncio.to_thread 执行同步 SDK，并用 timeout 限制等待。
-超时或取消等待不保证底层线程/远端模型立即停止，也不保证不会计费。
-已知结构错误在异常结算事务中标记 FAILED；其他普通异常按 UNCERTAIN 处理。
-进程退出、取消，或结算时已失去权限/锁，可能留下 STARTED，交给后续恢复处理。
+复用候选：
 
-### 5.4 T3：候选可靠保存
+```text
+history 找到 COMMITTED 尝试
+→ planning.candidate() 解析落库候选、检查摘要
+→ planning.validate()
+→ 内存 AcceptedPlan 对象
+```
 
-candidate、candidate_digest、COMMITTED 一起提交。
-此时只证明候选已可靠落库，不表示正式计划已接受，也不表示已执行知识任务。
+因此 `attempt_id, accepted = await _planning_candidate(...)` 是两个返回值的解包。真正写正式计划的语句是后面的 `ledger.accept_plan(session, accepted)`。
 
-返回变量 accepted 是“通过校验、准备接受的 AcceptedPlan 对象”，还没有正式入账。
+## 8. 完整事务顺序
 
-### 5.5 T4：正式接受与运行绑定
+事务 1、2、3 属于 `_planning_candidate()`；事务 4 是 `prepare_plan()` 中正式接受事务。
 
-按顺序：
+```text
+事务 1：授权、检查锁、登记/核对规划输入、查询历史
+        已有 COMMITTED → 复用返回，不再调用模型
+        旧 STARTED → 检查占用来源，必要时结算 UNCERTAIN
+提交
+  ↓
+事务 2：授权、检查锁、检查重试策略、保存新 STARTED
+提交
+  ↓
+事务外：等待模型，生成并校验候选
+  ↓
+事务 3：授权、检查锁、保存候选及 COMMITTED
+提交
+  ↓
+return attempt_id, accepted
+  ↓
+事务 4：重新读取候选 → 正式计划 + 来源关联 + 运行代次
+提交
+  ↓
+更新内存 guard.generation
+  ↓
+从数据库加载正式计划，交给后续节点
+```
 
-1. 重新鉴权并检查运行锁。
-2. 从历史中按 attempt_id 找到 COMMITTED 尝试。
-3. 重新读取候选、验证摘要和契约，与待接受内存对象比较。
-4. ledger.accept_plan 保存正式计划。
-5. PlanningAcceptanceRow 关联候选、正式计划和本次接受 actor。
-6. _bind_execution_run 创建/绑定正式 Run，登记 RunClaim，递增 current_generation。
-7. 同一事务提交。
-8. 提交后才把新 generation 赋给内存 guard。
+这是顺序执行：事务 3 成功提交、函数返回以后，才会开始事务 4。
 
-其中任意数据库写入失败，T4 全部回滚；此前 T3 保存的候选仍可保留供恢复复用。
+## 9. 原子性保证的范围
 
-### 5.6 最后读取
+`async with sessions.begin()` 正常退出提交，抛异常回滚。`add()` 或 `flush()` 都不等于最终提交。
 
-load_accepted_plan 另开 Session，重新检查权限、读取正式计划，返回：
+| 事务 | 原子提交的内容 |
+|---|---|
+| 事务 3 | 候选正文、摘要与尝试状态 COMMITTED |
+| 事务 4 | 正式计划及任务、候选来源关联、正式运行及执行代次记录 |
+
+两个事务之间没有整体原子性。“候选已提交、正式计划尚未接受”是允许存在且能够恢复的中间状态。
+
+数据库不能撤销模型调用，也不能退回费用。模型已执行但结果没有可靠保存时，可能只能记录 UNCERTAIN，不能断言未执行。
+
+## 10. 接受事务里的检查分别做什么
+
+### 10.1 authorize_run
 
 ```python
-{
-    "investigation_plan": plan,
-    "task_execution_results": [],
-    "observation": None,
-    "round_complete": False,
-    "investigation_status": "OPEN",
-}
+trusted = await authorize_run(session, runtime)
 ```
 
-这是从唯一正式事实加载本轮初始状态，不代表每次图恢复都会清空全部历史；
-恢复入口结合 checkpoint 决定继续哪个节点，不能脱离 runner 任意调用该函数复写 State。
-
-## 6. 为什么运行锁与事务行锁同时存在
-
-| 锁 | 持有位置 | 生命周期 | 作用 |
-|---|---|---|---|
-| session advisory lock | 专用 AUTOCOMMIT 连接 | 同一 runner 调用期间，跨 T1–T4 和外部调用 | 同一 run 的正常执行者互斥 |
-| FOR UPDATE 行锁 | 业务 Session | 当前事务提交/回滚结束 | 避免已有 Attempt/Run 行被并发修改 |
-| 唯一约束/FK/触发器 | PostgreSQL | 写入时强制检查 | 拦截重复、错归属、非法状态变化与历史覆盖 |
-
-T2 commit 会释放该事务行锁，但不会释放另一个专用会话持有的运行锁。
-不会为等待模型而保持业务长事务；运行锁本身仍占用专用连接。
-正常退出会关闭/失效化专用连接；进程死亡后由 PG 确认会话结束再释放锁，网络故障时不保证立即释放。
-advisory lock 是协作锁，不会自动禁止绕过协议的人工 SQL；数据库约束承担另一层保护。
-
-## 7. 场景 A：用户连续点击两次开始
-
-前提：同一案件、轮次解析为同一个 run_id。
-
-| 时刻 | 请求 A | 请求 B | 结果 |
-|---|---|---|---|
-| 0 秒 | 获取运行锁成功 | 未开始 | A 可进入规划 |
-| 1 秒 | 模型等待中 | 尝试同一锁 | B 获取失败 |
-| 2 秒 | 继续等待 | 抛 RecoveryBlockedError | B 不调用模型、不建第二套规划 |
-
-不能只断言页面出现一次结果。验证应检查 B 被拒绝、模型调用计数为 1、没有多余 Attempt。
-如果 B 在 A 完全结束释放锁后才进入，则允许接续，并从已保存结果复用，不再生成计划。
-
-对应测试：test_concurrent_initial_planning_is_blocked_by_same_round_lock。
-
-## 8. 场景 B：STARTED 提交后，模型调用前或调用中崩溃
+核对数据库 canonical 案件和轮次归属，分别检查 READ、CONTINUE。两项都需明确允许。
 
 ```text
-T2 提交：Attempt A1 = STARTED，claim=C1
-→ 进程退出，尚无 COMMITTED
-→ 新进程取得运行锁，planning_claim_id=C2
-→ T1 发现 A1.claim_id != C2
-→ A1 结算 UNCERTAIN
-→ T2 默认策略阻止重试
+READ：允许读取案件及历史
+CONTINUE：允许继续推进调查
 ```
 
-即使实际上尚未发出请求，本地也不能仅靠 STARTED 证明这一点，所以保守处理。
-显式允许 retry_uncertain 后，新建 A2；A1 保留 UNCERTAIN，原 actor 不改成新 actor。
+`trusted` 是经过核对的上下文，不是布尔值。这不等同于知识工具的 `knowledge:search` 授权。
 
-验证：默认无第二次模型调用；显式允许后多一个新 Attempt，旧记录不变。
-对应测试：test_unknown_planning_interruption_requires_explicit_retry_and_preserves_actor。
+等待模型期间可能撤权，所以接受前重新检查有价值；但检查后、提交前仍可能发生撤权。当前没有承诺与外部权限系统形成原子撤权协议。
 
-## 9. 场景 C：候选已提交，正式接受前退出
+### 10.2 check_lock
 
-| 步骤 | PostgreSQL 状态 | 恢复动作 |
+```python
+await invocation.guard.check_lock()
+```
+
+确认原来的专用连接仍有效并持有运行会话锁。它检查执行权，不检查用户权限；此时尚未建立正式代次，因此不是完整的 generation 对账。
+
+### 10.3 查询候选来源
+
+```python
+facts = await planning.history(session, invocation.identity.run_id)
+fact = next((row for row in facts if row.attempt_id == attempt_id), None)
+```
+
+`history()` 使用 FOR UPDATE，保护事务内的尝试行检查。`next(..., None)` 表示找到第一条编号匹配的记录，找不到返回 None。
+
+### 10.4 COMMITTED 检查不是再次保存
+
+```python
+if fact is None or fact.status != "COMMITTED":
+    raise ledger.LedgerIntegrityError(...)
+```
+
+这里只检查。候选已经在事务 3 中保存，正式接受事务不重复生成或保存候选。
+
+当前正常路径中，事务 3 提交成功才返回，且存在运行锁和已提交记录不可变约束，这项检查不应触发。它是接受边界的防御性断言，针对错误编号、代码缺陷、越权修改或测试注入损坏；不是常规多线程竞争。
+
+事务 3 提交失败时会直接抛异常，不会正常返回后靠这条 if 补救。
+
+### 10.5 expected 与 accepted 比较
+
+```python
+expected = planning.candidate(fact, spec, source)
+if expected != accepted:
+    raise ledger.LedgerIntegrityError(...)
+```
+
+expected 来自数据库原文重验；accepted 来自函数返回。比较是为了发现落库对象与内存对象错配。
+
+正常流程应当一致。不能把“保存 A、接受 B”描述成经常自然出现的并发情况。
+
+可简化方向是：候选函数只返回 attempt_id，接受时从数据库构造唯一的正式计划对象，从而消除双份对象比较。**这个简化尚未实施。**
+
+### 10.6 正式接受与运行绑定
+
+```python
+row = await ledger.accept_plan(session, accepted)
+session.add(PlanningAcceptanceRow(...))
+generation = await _bind_execution_run(...)
+```
+
+三项分别记录：正式计划、由哪次候选和谁接受、由哪个运行和代次执行。它们同事务提交。
+
+`_bind_execution_run()` 不执行计划任务，也不再次取得运行锁。它新建或核对运行身份，推进 current_generation，保存本次执行者与策略。
+
+退出事务成功后才执行 `invocation.guard.generation = generation`，避免数据库回滚而内存提前宣称成功。
+
+## 11. 事务、行锁、运行锁、generation 的区别
+
+| 机制 | 目的 | 结束时机 |
 |---|---|---|
-| A 模型完成 | 尚未保存 | 不能仅凭内存复用 |
-| T3 提交 | A1=COMMITTED，候选及摘要已保存 | 候选可复用 |
-| A 进程退出 | 无正式 AcceptedPlan | B 重新拿锁 |
-| B 进入 T1 | 找到 COMMITTED 候选 | 验证后直接返回，跳过模型 |
-| B 进入 T4 | 正式计划、来源、Run 一起提交 | 保留原 task_id |
+| 数据库事务 | 一组数据库写入一起提交或回滚 | 当前事务结束 |
+| FOR UPDATE 行锁 | 检查/更新记录时防止并发修改 | 当前事务结束 |
+| advisory 运行锁 | 同一个 run 同时只由一个执行者推进 | 专用持锁会话释放或失效 |
+| generation | 识别旧执行者，拒绝过期提交 | 作为数据库与内存中的代次分别保存 |
 
-候选生成者和正式接受者可以不同，两者审计分别保存；B 必须重新拥有 READ/CONTINUE 权限。
-验证：模型总计只调用一次，任务 ID 与原候选相同，acceptance 指向原 attempt。
-对应测试：test_committed_candidate_or_acceptance_survives_missing_node_checkpoint；
-test_actual_process_exit_after_candidate_commit_resumes_without_replanning（真实子进程退出）。
+advisory lock 是合作协议，不会自动锁住所有业务表行。事务提交释放行锁，但外层专用连接可以继续持有运行锁。
 
-## 10. 场景 D：正式接受成功，但 checkpoint 还没保存就崩溃
+因此模型等待期间没有持续开启这些账本短事务，仍有运行互斥保护。
 
-```text
-T4 commit：AcceptedPlan + Acceptance + Run/Claim 全部成功
-→ 内存赋值或节点返回/checkpoint 前进程退出
-→ B 从 PG 发现正式计划与运行
-→ _claim 绑定新代次，例如 1→2
-→ prepare_plan 不走 generation==0 分支
-→ 加载原正式计划，不重新调用初始模型
-```
+## 12. 这里是不是多线程
 
-检查：同一计划、同一 task_id、同一接受来源；新 run claim 不覆盖旧 claim。
-对应测试：test_committed_candidate_or_acceptance_survives_missing_node_checkpoint 的 acceptance 分支。
+同一次调用中，事务 3 和正式接受事务不会并行。`await _planning_candidate(...)` 会等待完成才继续。
 
-## 11. 场景 E：正式接受前，旧持锁连接被终止
+`asyncio.to_thread()` 只是把同步 Agent 调用移到工作线程，代码仍 await 结果；它不自动产生新的调查运行或代次。
 
-这里必须区别于正式 Run 的 1→2 例子。
-
-| 时刻 | A | B | 数据库 |
-|---|---|---|---|
-| 0 秒 | guard.generation=0，claim=C1，等模型 | 未开始 | A1=STARTED，无正式 Run |
-| 5 秒 | 持锁 PG 会话被终止，HTTP 仍可继续 | 未开始 | 运行锁释放后可被获取 |
-| 6 秒 | 仍等模型 | 取得锁，guard.generation=0，claim=C2 | 旧 A1→UNCERTAIN |
-| 7 秒 | 仍等模型 | 显式允许重试，新建 A2 | A1 不被覆盖 |
-| 10 秒 | 仍等模型 | 保存候选并正式接受 | 第一份正式 Run 通常 generation=1 |
-| 20 秒 | 模型返回，尝试 T3 | 已完成 | A 的 check_lock 失败，不允许保存 |
-
-B 没有显式重试许可时会停在策略检查，不会自动重新调用模型。
-检查：A 无法保存旧候选；B 的正式计划唯一；A1 保留 UNCERTAIN，A2 为 COMMITTED。
-对应测试：test_lost_planning_lock_fences_old_candidate_after_new_actor_finishes。
-
-## 12. 场景 F：正式运行已有 generation=1，旧执行者恢复活动
+需要防止的是两个独立请求同时推进同一个 run：可能来自同线程异步任务、不同线程、进程或服务器。单线程也会在等待 I/O 时交错处理请求。
 
 ```text
-A generation=1，等待外部模型
-→ A 持锁连接终止（Python/HTTP 不一定停止）
-→ B 取得锁并提交 _bind_execution_run：1+1=2
-→ B 内存 generation=2
-→ A 模型返回，尝试提交
-→ check_lock 发现旧连接无效，拒绝
+连续点击两次
+→ A 取得 RUN_01 的锁并执行
+→ B 取锁失败，拒绝重复推进
 ```
 
-若继续执行代次检查，则 A 的 1 与数据库 2 不匹配也应拒绝；实际可能在锁检查就抛错，
-不代表两次检查必然都执行。generation 校验必须由提交端执行才有效，不是数字本身有魔力。
-这属于后续正式 phase 的防护，用来理解 prepare_plan 绑定代次的目的；
-prepare_plan 接受前自身主要调用 check_lock，不能误写成它已执行 guard.check 的 Run 行比较。
+不同 run 可以并行。超时或取消等待也不保证工作线程里的外部调用已经停止，因此中断不总能当成明确失败。
 
-检查：旧产物不能被保存成当前有效结果；不保证远端请求停止或不计费。
-对应测试：test_lost_lock_connection_fences_old_worker_after_new_generation_finishes。
+## 13. generation 会不会随线程重置
 
-## 13. 场景 G：生成期间撤权与授权窗口
+不会。内存 guard.generation 是本次执行者持有的代次，数据库 current_generation 是当前正式代次。
 
-### 已撤权能拦住
+$$
+g_{new}=\operatorname{COALESCE}(g_{old},0)+1
+$$
 
 ```text
-A 有 READ + CONTINUE，T2 保存 STARTED
-→ 模型等待期间管理员撤销 CONTINUE
-→ 模型返回
-→ T3 _authorize 拒绝
-→ 不保存成功候选，不接受计划，不执行知识任务
+A 持有代次 1，等待模型
+→ A 持锁连接断开
+→ B 接续同一个 run，数据库代次推进为 2
+→ A 返回，手中仍是 1
+→ 完整 guard 检查发现不匹配，拒绝旧提交
 ```
 
-因为结算路径本身需要授权，可能保留 STARTED，而不是强行标记 FAILED；之后有权限的恢复者处理。
-验证：无 AcceptedPlan、无知识执行 Attempt；不能把这个状态误报为计划已完成。
-对应测试：test_revoked_continue_after_model_never_accepts_or_executes。
+规划接受前可以是 0，接受后建立正式代次。另一个全新 run 有独立代次。新请求必须先取得运行权，不能在 A 正常持锁时直接拿到下一代。
 
-### 极窄窗口仍然存在
+## 14. 案件、轮次为什么还要核对
 
-T3 授权通过后立刻撤权，T3 仍可能提交候选；T4 的重检可能随后拒绝正式接受。
-T4 授权通过后到 T4 commit 前再次撤权，也仍存在窗口。不能声称这些重检保证原子撤权。
+边界检查防止错误参数或共享可变对象造成“案件 A + 属于案件 B 的轮次”，也防止传入篡改 ID。
 
-## 14. 场景 H：只有读取权限，试图恢复执行
+正常可信加载路径中，这类错误应很少发生。线程切换不会随机把对象换成另一个案件。
 
-```text
-Actor B 可以 READ 历史
-但 CONTINUE 返回 False
-→ runner 的继续鉴权失败
-→ 不能因为能看到历史，就允许创建新尝试
-```
+外键保证数据库记录的合法关联，不能单独证明调用者传入的上下文就对应这些记录；入口和恢复边界仍要核对。
 
-验证：受控只读历史入口可以按权限读取；执行 runner 必须分别通过两项权限，失败不进入模型/工具。
-对应测试：test_resume_checks_both_permissions_before_reading_checkpoint；test_access_postgres.py 的读/继续分权测试。
+但是“归属校验必要”不等于“同一事务重复加载、重复校验每次都不可省”。未来可以梳理合并，不能为每项冗余都制造常见故障理由。
 
-## 15. 场景 I：伪造上下文或候选
+## 15. 故障场景与预期行为
 
-| 输入问题 | 拦截位置 | 应验证的结果 |
+| 场景 | 保存状态 | 处理 |
 |---|---|---|
-| 调查 I1 配上 I2 的 Round | check_runtime / FK | 调用模型前拒绝 |
-| 案件 model_id=M1，知识 scope=M2 | KnowledgeSearchTool.validate_binding | 调用前拒绝 |
-| 上下文案件内容与 PG canonical 内容不同 | _bound_context 比较 | 拒绝访问 |
-| 重复 task_id、空目标、不支持能力、非 PENDING | planning.validate / AcceptedPlan | 不接受、不执行任务 |
-| 内存待接受对象与已保存候选不同 | T4 expected != accepted | 拒绝接受 |
-| 不同正式计划内容被强行关联到候选 | 数据库 acceptance trigger | 写入失败，事务回滚 |
+| 首次正常完成 | 候选 COMMITTED、正式计划、来源及运行代次 | 加载正式计划，进入任务执行 |
+| 候选已提交、尚未接受 | 有可靠候选，无正式计划 | 直接复用，不再次调用模型 |
+| 模型执行后、事务 3 提交前中断 | 可能只有 STARTED | 按旧占用与显式策略处理 UNCERTAIN |
+| 事务 3 提交后崩溃 | COMMITTED 候选 | 下次复用并完成接受 |
+| 接受事务某项写入失败 | 接受事务全部回滚，候选仍在 | 保留候选，后续可重入 |
+| 接受提交后、内存或 checkpoint 更新前崩溃 | 正式计划与运行已存在 | 下次从数据库识别并加载 |
+| 两个请求同时推进同一 run | 一方持有运行锁 | 另一方拒绝，不重复推进 |
+| 等待模型期间丢失持锁连接 | 旧进程已失去执行权 | 后续锁检查拒绝写入 |
+| 重新鉴权观察到撤权 | 已提交事实仍保留 | 拒绝后续未授权步骤 |
+| 内存候选与落库候选错配 | 原候选仍保留 | 完整性断言报错 |
 
-确定性检查不证明 statement/goal 的语义正确；越权人工 SQL 若同时改动数据与摘要，也不能只靠 hash 发现。
-对应测试：test_runtime.py、test_tool_runtime.py、test_invalid_initial_plan_is_not_accepted_or_executed、
-test_acceptance_cannot_bind_different_plan_content_to_committed_candidate。
+FAILED、UNCERTAIN 和零命中不是同一种结果。重试须由显式策略决定，不能用“重来一次看看”隐藏未知调用。
 
-## 16. 场景 J：接受事务写到一半失败
+## 16. 返回 State 与当前边界
 
-```text
-accept_plan 已执行 flush
-→ 保存 Acceptance 或绑定 Run 时失败
-→ T4 rollback
-→ T4 内新增正式计划/来源/运行变更一起回滚
-→ T3 早已提交的候选仍保留
-```
+`load_accepted_plan()` 从 PostgreSQL 读取正式计划，校验后转换为 JSON 可保存结构，返回计划、空任务结果、空 Observation、round_complete=False、investigation_status=OPEN。
 
-flush 不是 commit。没有“accept_plan 函数返回就一定永久接受”的保证，外层事务才是提交边界。
-恢复应从候选复用再尝试接受，不能重新生成 task_id。
-这条是事务原子性的推导；当前测试有接受来源错配回滚验证，但不能把它说成已覆盖
-每一条 SQL 语句前后的全部故障排列。
+它只是为后续任务执行准备状态，不关闭案件、不确认根因、不执行真正多轮 Replanning。
 
-## 17. 数据库约束与事务的最后防线
+当前运行和规划输入只支持 v2，旧格式会被拒绝。Operation、Result 等其他契约各有版本，不能把所有 v1 一概视为同一种旧数据。
 
-- PlanningRun：run_id 主键；round_id、plan_id 唯一；案件/轮次复合 FK；稳定规格不可原地修改。
-- PlanningAttempt：同 run 的 attempt_number 唯一；部分唯一索引限制至多一个 STARTED 和一个 COMMITTED。
-- Attempt 的状态与结束时间、候选正文/摘要存在性保持一致。
-- STARTED 只能结算到合法终态，终态与历史不能原地覆盖。
-- Acceptance 关联同一 run/plan/investigation/round 和 COMMITTED attempt。
-- 迁移 0007 的 trigger 校验候选与正式计划内容匹配、actor 归因和摘要形状等。
+## 17. 必需目标和可简化实现
 
-约束不是跨 PG 与外部模型的分布式事务，不会自动撤销远端模型调用。
+| 内容 | 判断 |
+|---|---|
+| 正式任务需要可靠计划来源 | 核心目标 |
+| 同一 run 避免并发重复推进 | 核心目标，运行锁是当前方式 |
+| 数据库写入事务一致性 | 核心目标 |
+| 外部调用中断保留不确定性 | 核心目标，不能靠数据库回滚解决 |
+| 候选与正式计划分两个事务 | 不是唯一方案，当前用于明确恢复边界 |
+| expected/accepted 双份对象比较 | 防御性实现，可通过单一数据来源简化 |
+| 每个内部步骤重复校验同样对象 | 不应一概认定必需，应按边界梳理 |
 
-## 18. 不保证什么，以及可优化什么
-
-1. 不保证外部 API exactly-once。未来有副作用的工具必须让接收端支持稳定幂等键。
-2. 不保证 timeout 后同步线程与远端调用停止。
-3. 不保证会话未结束的挂死 worker 可以被自动接管；lease/hung-worker takeover 尚未实现。
-4. 不保证外部权限撤销与本地提交严格原子一致。
-5. 不把 checksum 当作防数据库管理员篡改的数字签名。
-6. 当前异常/重试策略为 run-wide，不是每工具/每操作细粒度策略。
-7. 授权链重复加载与同 action 重复校验可收敛，但不能删掉必要的 READ/CONTINUE 与提交前重检。
-8. prepare_plan 保持首轮知识能力边界，不等于多轮调查和记忆系统已实现。
-
-## 19. 如何复核测试证据
-
-测试位置：
-
-- [初始规划 PostgreSQL 故障测试](../backend/tests/workflow/test_initial_planning_postgres.py)
-- [正式执行与恢复 PostgreSQL 测试](../backend/tests/workflow/test_recovery_postgres.py)
-- [资源授权与账本访问测试](../backend/tests/workflow/test_access_postgres.py)
-- [通用身份测试](../backend/tests/workflow/test_runtime.py)
-- [工具绑定测试](../backend/tests/workflow/test_tool_runtime.py)
-
-前一轮解释时实际运行过的针对性测试：10 passed、33 deselected，1 条既有依赖警告。
-该组包含并发重复执行、锁连接终止、阶段提交后 checkpoint 前崩溃、UNCERTAIN 策略、
-规划期间撤权、候选/接受后缺失 checkpoint，以及候选提交后的真实子进程退出。
-它不是本文全部场景每一个细分排列的覆盖证明。本次仅写文档，未重新运行这些测试。
-
-建议手工/自动故障注入统一检查：
-
-```text
-允许哪些数据库事实留下？
-哪次外部调用允许发生？
-是否允许新增 Attempt？
-旧 actor、task_id、候选、正式计划是否保持原值？
-失败发生在 commit 前还是后？
-恢复后是否读取原事实，还是错误地重新生成？
-```
-
-不要只断言“抛了异常”或“最后有一份计划”，应同时断言副作用次数和数据库终态。
-
-## 20. 记忆卡片
-
-```text
-授权：这个人能不能做。
-运行锁：同一 run 当前是否已经有人在做。
-行锁：这一小段事务内，已有数据行能否被并发修改。
-claim_id：正式接受前，区分是哪次规划执行权留下的尝试。
-generation：正式 Run 的执行代次，拒绝过期执行者。
-STARTED：准备执行已经可靠记账，不证明外部请求一定发出。
-COMMITTED 候选：候选可靠保存，不等于正式计划已经接受。
-AcceptedPlan：已经正式接受的计划事实，不等于任务已执行。
-checkpoint：图推进到哪里，不替代执行账本。
-```
-
-相关说明：[图内初始规划与恢复](workflow-initial-planning-recovery.md)、
-[可信环境与知识工具](workflow-trusted-tools.md)。
+阅读时先抓住主线：**可靠候选 → 正式接受 → 加载正式计划**，再分别跟踪事务、授权和运行权。不要把每项防御性检查都理解为正常流程经常会发生的异常。

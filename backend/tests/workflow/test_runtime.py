@@ -1,6 +1,7 @@
 """8B：共享图按次隔离身份，模型调用前确定性校验案件/范围/授权。"""
 
 import asyncio
+from workflow_test_helpers import tool_call
 
 import pytest
 from workflow_test_helpers import run_business_nodes
@@ -73,9 +74,9 @@ def test_business_nodes_handle_two_actors_without_identity_or_scope_leak(monkeyp
             model = source.user_query.model_id
             return InvestigationPlan(goal="查历史", tasks=[InvestigationTask(task_id=f"T-{model}", objective=model,
                 capability="KNOWLEDGE_RETRIEVAL", expected_result="线索")])
-        def formulate_knowledge_query(self, task, source, **_):
+        def formulate_tool_call(self, task, source, **_):
             assert task.objective == source.user_query.model_id
-            return {"query": f"模型{task.objective}的历史案例", "top_k": 1}
+            return tool_call({"query": f"模型{task.objective}的历史案例", "top_k": 1})
     async def retrieve(request, **options):
         await asyncio.sleep(0)
         return DenseChildRetrievalResult(snapshot=RetrievalRouteSnapshot(index_profile=options["index_profile"],
@@ -128,7 +129,7 @@ def test_revocation_after_planning_stops_before_query_formulation():
             permission["allowed"] = False
             return InvestigationPlan(goal="查历史", tasks=[InvestigationTask(task_id="T", objective="查历史",
                 capability="KNOWLEDGE_RETRIEVAL", expected_result="线索")])
-        def formulate_knowledge_query(self, *_args, **_kwargs):
+        def formulate_tool_call(self, *_args, **_kwargs):
             pytest.fail("权限撤销后不能生成 Query")
     source = planning()
     context = make_runtime(source, authorize_resource=lambda *_: permission["allowed"])

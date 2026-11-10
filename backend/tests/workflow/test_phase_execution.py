@@ -1,6 +1,7 @@
 """8D-2：唯一业务循环通过可替换的阶段执行机制运行。"""
 
 import asyncio
+from workflow_test_helpers import runtime_for, tool_call
 
 from risk_platform.execution import knowledge as registered_knowledge
 
@@ -16,9 +17,9 @@ def test_business_nodes_have_no_default_direct_executor():
     current, events = state(1), []
     with pytest.raises(TypeError, match="execute_phase"):
         asyncio.run(nodes.task_execution(current, investigation_agent=Agent(current, events),
-            execution_context=context(), authorize=lambda *_: True))
+            runtime_context=runtime_for(current["planning_input"], context(), authorize=lambda *_: True)))
     with pytest.raises(TypeError, match="execute_phase"):
-        asyncio.run(nodes.observation(current, investigation_agent=object(), execution_context=context()))
+        asyncio.run(nodes.observation(current, investigation_agent=object(), runtime_context=runtime_for(current["planning_input"], context())))
     assert events == []
 
 
@@ -30,9 +31,9 @@ def test_shared_loop_and_observation_use_phase_executor_in_business_order(monkey
         return await produce()
     async def scenario():
         result = await nodes.task_execution(current, investigation_agent=Agent(current, events),
-            execution_context=context(), authorize=lambda *_: True, execute_phase=execute)
-        update = await nodes.observation(result, investigation_agent=object(),
-            execution_context=context(), execute_phase=execute)
+            runtime_context=runtime_for(current["planning_input"], context(), authorize=lambda *_: True), execute_phase=execute)
+        update = await nodes.observation({**current, **result}, investigation_agent=object(),
+            runtime_context=runtime_for(current["planning_input"], context()), execute_phase=execute)
         assert update["observation"].status == "INCONCLUSIVE"
     asyncio.run(scenario())
     assert phases == [
@@ -49,7 +50,7 @@ def test_failed_query_has_no_execution_phase(monkeypatch):
         phases.append(kind)
         return await produce()
     result = asyncio.run(nodes.task_execution(current, investigation_agent=Agent(current, events, ValueError("private")),
-        execution_context=context(), authorize=lambda *_: pytest.fail("失败 Query 不得进入工具"), execute_phase=execute))
+        runtime_context=runtime_for(current["planning_input"], context(), authorize=lambda *_: pytest.fail("失败 Query 不得进入工具")), execute_phase=execute))
     assert phases == [OperationType.QUERY_FORMULATION]
     assert result["task_execution_results"][0].error.code == "QUERY_FORMULATION_INVALID"
 
@@ -70,5 +71,5 @@ def test_task_identity_is_validated_before_phase_can_commit(monkeypatch):
         return output
     with pytest.raises(ValueError, match="身份不一致"):
         asyncio.run(nodes.task_execution(current, investigation_agent=Agent(current, events),
-            execution_context=context(), authorize=lambda *_: True, execute_phase=execute))
+            runtime_context=runtime_for(current["planning_input"], context(), authorize=lambda *_: True), execute_phase=execute))
     assert committed == [OperationType.QUERY_FORMULATION]

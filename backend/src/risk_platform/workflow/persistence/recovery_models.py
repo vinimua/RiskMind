@@ -20,7 +20,7 @@ class InvestigationRunRow(PayloadRow, Base):
         ForeignKeyConstraint(["run_id", "current_generation"], ["investigation_run_claims.run_id", "investigation_run_claims.generation"],
             name="fk_run_current_claim", use_alter=True, deferrable=True, initially="DEFERRED"),
         UniqueConstraint("round_id", name="uq_first_round_run"),
-        CheckConstraint("schema_version = 1 AND (current_generation IS NULL OR current_generation > 0)", name="ck_run_generation"),
+        CheckConstraint("schema_version IN (1,2) AND (current_generation IS NULL OR current_generation > 0)", name="ck_run_generation"),
     )
 
 

@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.workflow import recovery
+from risk_platform.workflow import access, runner as runner_module
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.models import AttemptRow, OperationRow
@@ -26,7 +27,7 @@ def test_native_selection_is_committed_and_resume_does_not_repeat_model_or_tool(
             content=None, tool_calls=[SimpleNamespace(type="function", function=SimpleNamespace(
                 name=selected_name, arguments=json.dumps({"query": "Query native", "top_k": 1})))]))])
     real_agent = InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), agent.model)
-    agent.formulate_knowledge_query = real_agent.formulate_knowledge_query
+    agent.formulate_tool_call = real_agent.formulate_tool_call
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, count=1)
@@ -50,7 +51,7 @@ def test_native_selection_is_committed_and_resume_does_not_repeat_model_or_tool(
     asyncio.run(scenario())
 
 
-def test_changed_tool_contract_cannot_silently_resume_existing_run(database, monkeypatch):
+def test_changed_tool_contract_does_not_relabel_or_rerun_committed_history(database, monkeypatch):
     agent = Agent()
     retrieval(monkeypatch, agent)
     async def scenario():
@@ -58,8 +59,60 @@ def test_changed_tool_contract_cannot_silently_resume_existing_run(database, mon
             await seed(sessions, count=1)
             await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             events = list(agent.events)
-            monkeypatch.setattr(recovery, "query_contract_digest", lambda _: "0" * 64)
-            with pytest.raises(ledger.LedgerConflictError):
-                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
+            from risk_platform.workflow import phase_execution
+            monkeypatch.setattr(phase_execution, "query_contract_digest", lambda _: "0" * 64)
+            await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert agent.events == events
+    asyncio.run(scenario())
+
+
+def test_resource_authorization_can_load_case_without_any_knowledge_binding(database):
+    from risk_platform.workflow.access import load_runtime_context
+    from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext
+    agent = Agent()
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, _, runner):
+            await seed(sessions, count=1)
+            async with sessions() as session:
+                runtime = await load_runtime_context(session, investigation_id="I", round_id="R", actor_id="A",
+                    tools=(), authorize_resource=lambda *_: True, action=InvestigationAction.CONTINUE)
+                trusted = await access.authorize_run(session, runtime)
+                assert isinstance(trusted, InvestigationRuntimeContext) and trusted.tools == ()
+                assert not hasattr(trusted, "index_profile")
+    asyncio.run(scenario())
+
+
+def test_bound_knowledge_dependencies_reach_retrieval_without_entering_checkpoint(database, monkeypatch):
+    from dataclasses import replace
+    from risk_platform.execution import knowledge
+    from risk_platform.knowledge.retrieval import DenseChildRetrievalResult
+    from risk_platform.knowledge.context_resolution import ContextResolutionResult
+    from risk_platform.knowledge.serving_contracts import RetrievalRouteSnapshot
+    agent = Agent()
+    embedder, milvus = object(), object()
+    seen = []
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions, count=1)
+            runtime = await context(sessions)
+            runtime = replace(runtime, tools=(replace(runtime.tools[0], session_factory=sessions,
+                embedding_client=embedder, milvus_client=milvus),))
+            async def retrieve(request, **options):
+                assert options["session_factory"] is sessions
+                assert options["embedding_client"] is embedder and options["milvus_client"] is milvus
+                seen.append("retrieve")
+                return DenseChildRetrievalResult(snapshot=RetrievalRouteSnapshot(index_profile="parent-child-v1",
+                    collection="bound-physical", route_version=1), hits=())
+            async def resolve(result, **options):
+                assert options["session_factory"] is sessions
+                return ContextResolutionResult(snapshot=result.snapshot, contexts=())
+            monkeypatch.setattr(knowledge, "retrieve_dense_children", retrieve)
+            monkeypatch.setattr(knowledge, "resolve_knowledge_contexts", resolve)
+            result = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=runtime))
+            assert result["task_execution_results"][0].status == "SUCCEEDED" and seen == ["retrieve"]
+            checkpoint = await runner._graph.aget_state({"configurable": {"thread_id": result["run_id"]}})
+            payload = json.dumps(checkpoint.values)
+            assert "embedding_client" not in payload and "milvus_client" not in payload and "session_factory" not in payload
+            second = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=runtime))
+            assert second == result and seen == ["retrieve"]
     asyncio.run(scenario())

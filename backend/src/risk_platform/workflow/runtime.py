@@ -46,6 +46,15 @@ class InvestigationRuntimeContext:
     tools: tuple[TrustedToolBinding, ...] = ()
     timeout_seconds: float = 30.0
 
+# | 字段 | 保存什么 | 举例 |
+# |---|---|---|
+# | `investigation` | 案件正式记录，包含调查输入等信息 | 调查 `credit_v3` 模型异常的案件 |
+# | `round` | 本次调查轮次的正式记录 | 这个案件的第 1 轮 |
+# | `actor_id` | 当前执行者身份 | `"user_001"` |
+# | `authorize_resource` | 判断案件访问权限的**函数** | 判断用户能否读取或继续这个案件 |
+# | `tools` | 本次应用配置的工具绑定 | 知识检索工具及其权限、范围、依赖 |
+# | `timeout_seconds` | 本次运行上下文配置的超时预算，单位秒 | `30.0` |
+
 
 def check_runtime(context: InvestigationRuntimeContext, action: InvestigationAction,
                   planning_input: InitialPlanningInput | None = None) -> InvestigationRuntimeContext:

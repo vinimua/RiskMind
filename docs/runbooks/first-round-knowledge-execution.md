@@ -36,9 +36,9 @@ round_complete=True，investigation_status=OPEN
 
 ```python
 from risk_platform.workflow.invocation import InvestigationInvocation
-from risk_platform.workflow.recovery import FirstRoundRecovery
+from risk_platform.workflow.runner import InvestigationRunner
 
-runner = FirstRoundRecovery(
+runner = InvestigationRunner(
     investigation_agent,
     session_factory=sessions,
     checkpointer=saver,

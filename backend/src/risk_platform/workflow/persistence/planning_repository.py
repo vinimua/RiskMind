@@ -4,15 +4,30 @@ from datetime import datetime, timezone
 from uuid import uuid4
 from sqlalchemy import select
 from risk_platform.workflow.contracts import CapabilityType
+from risk_platform.workflow.knowledge_tool import knowledge_execution
+from risk_platform.workflow.runtime import InvestigationAction
 from . import repository as ledger
 from .business_inputs import AttemptAttribution
 from .contracts import AcceptedPlan, canonical_json, input_digest
-from .planning_contracts import PlanningCandidate, PlanningSpec
+from .planning_contracts import PlanningCandidate, PlanningInput
 from .planning_models import PlanningAttemptRow, PlanningRunRow
 
 
-async def register(session, spec: PlanningSpec):
+def read_spec(row) -> PlanningInput:
+    """只读取当前 v2 规划输入；拒绝旧格式而不隐式转换。"""
+    if row.schema_version != 2:
+        raise ledger.LedgerIntegrityError("仅支持 v2 规划记录，旧版本不能恢复")
+    return ledger._read(row, PlanningInput)
+
+
+async def register(session, spec: PlanningInput):
     execution = spec.execution
+    await ledger._lock(session, f"record:{PlanningRunRow.__tablename__}:{execution.run_id}")
+    existing = await session.get(PlanningRunRow, execution.run_id)
+    if existing is not None:
+        if read_spec(existing) != spec:
+            raise ledger.LedgerConflictError("初始规划阶段输入已固定，不能覆盖")
+        return existing
     return (await ledger._insert(session, PlanningRunRow, execution.run_id, spec,
         run_id=execution.run_id, investigation_id=execution.investigation_id,
         round_id=execution.round_id, plan_id=execution.plan_id))[0]
@@ -45,7 +60,7 @@ def validate(value, spec, source):
 
 async def start(session, spec, *, context, trusted, claim_id, number):
     attribution = AttemptAttribution(investigation_id=context.investigation.investigation_id,
-        round_id=context.round.round_id, actor_id=trusted.actor_id, execution_context=trusted)
+        round_id=context.round.round_id, actor_id=trusted.actor_id, execution_context=knowledge_execution(context, InvestigationAction.CONTINUE))
     row = PlanningAttemptRow(attempt_id="planning-attempt-" + uuid4().hex, run_id=spec.execution.run_id,
         attempt_number=number, actor_id=trusted.actor_id, claim_id=claim_id,
         attribution=canonical_json(attribution), attribution_digest=input_digest(attribution), status="STARTED")

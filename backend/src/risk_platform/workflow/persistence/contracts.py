@@ -97,7 +97,13 @@ class OperationInput(LedgerContract):
 
 def operation_key(value: OperationInput) -> str:
     """身份摘要不包含业务输入；相同逻辑身份的输入变化必须触发冲突。"""
-    identity = [value.investigation_id, value.round_id, value.plan_id, value.task_id, value.operation_type.value]
+    return operation_identity_key(value.investigation_id, value.round_id, value.plan_id,
+                                  value.task_id, value.operation_type)
+
+
+def operation_identity_key(investigation_id, round_id, plan_id, task_id, operation_type) -> str:
+    """只根据逻辑操作身份定位历史；不需要当前模型配置。"""
+    identity = [investigation_id, round_id, plan_id, task_id, OperationType(operation_type).value]
     return hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 

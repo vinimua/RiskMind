@@ -1,6 +1,7 @@
 """7C 的执行事实、来源链与解释失败语义；不使用真实模型。"""
 
 import asyncio
+from workflow_test_helpers import runtime_for, tool_call
 
 from risk_platform.execution import knowledge as registered_knowledge
 from datetime import datetime, timezone
@@ -77,8 +78,8 @@ def run(results, data=None, failure=None):
             if failure:
                 raise failure
             return KnowledgeObservationDraft.model_validate(data if data is not None else draft(results))
-    return asyncio.run(nodes.observation(current(results), investigation_agent=Agent(), execution_context=KnowledgeExecutionContext(
-        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD), execute_phase=run_phase))['observation']
+    return asyncio.run(nodes.observation(current(results), investigation_agent=Agent(), runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(
+        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))['observation']
 
 
 def test_mixed_results_keep_failure_facts_and_traceable_historical_finding():
@@ -176,7 +177,7 @@ def test_actual_deadline_without_partial_output():
             time.sleep(.04)
             return KnowledgeObservationDraft.model_validate(draft(results))
     ctx = KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD, timeout_seconds=.001)
-    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), execution_context=ctx, execute_phase=run_phase))
+    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), runtime_context=runtime_for((current(results))["planning_input"], ctx), execute_phase=run_phase))
     assert result["observation"].error.code == "OBSERVATION_TIMEOUT"
 
 
@@ -192,8 +193,8 @@ def test_business_observation_does_not_close_case_or_change_execution_results(mo
     class Agent:
         def initial_plan(self, _):
             return pending
-        def formulate_knowledge_query(self, *_, **__):
-            return {"query": "具体问题", "top_k": 1}
+        def formulate_tool_call(self, *_, **__):
+            return tool_call({"query": "具体问题", "top_k": 1})
         def observe_knowledge_round(self, *_):
             if bad_model:
                 raise ValueError("private")
@@ -235,7 +236,7 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
             data = draft(supplied)
             return KnowledgeObservationDraft.model_validate(data)
     output = asyncio.run(nodes.observation(current(results), investigation_agent=MutatingAgent(),
-        execution_context=KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD), execute_phase=run_phase))
+        runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))
     assert output["observation"].error.code == "OBSERVATION_INVALID"
     assert results[0].payload.resolved.contexts[0].content == original_text
     assert results[0].payload.retrieved.hits[0].hit.source.document_version == "v1"

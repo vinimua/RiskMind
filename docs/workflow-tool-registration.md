@@ -1,5 +1,8 @@
 # 最小工具注册与原生模型工具选择
 
+> 后续通用入口修正：工作流已改为按绑定交集选择工具、保留 ToolCall 名称，
+> 不再由通用节点预取知识上下文。以 [通用任务执行边界](workflow-generic-task-execution.md) 为当前实现说明。
+
 ## 1. 本次范围
 
 参考 DevF 的“名称映射到工具声明和执行函数”，使用已有 OpenAI-compatible SDK 的原生 function calling。

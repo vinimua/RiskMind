@@ -24,10 +24,11 @@
 ```python
 from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.workflow.invocation import InvestigationInvocation
-from risk_platform.workflow.recovery import FirstRoundRecovery
+from risk_platform.workflow.runner import InvestigationRunner
 
+# embedding_client / milvus_client 由应用创建并管理生命周期。
 # Investigation、Round 已入账；计划由图内 prepare_plan 生成并正式接受。
-runner = FirstRoundRecovery(investigation_agent, session_factory=sessions, checkpointer=saver)
+runner = InvestigationRunner(investigation_agent, session_factory=sessions, checkpointer=saver)
 
 async with sessions() as session:
     runtime_context = await load_runtime_context(
@@ -36,7 +37,12 @@ async with sessions() as session:
         round_id=round_id,
         actor_id=current_execution_context.actor_id,
         timeout_seconds=current_execution_context.timeout_seconds,
-        tools=(KnowledgeSearchTool(current_execution_context, knowledge_policy),),
+        tools=(KnowledgeSearchTool(
+            current_execution_context, knowledge_policy,
+            session_factory=sessions,
+            embedding_client=embedding_client,
+            milvus_client=milvus_client,
+        ),),
         authorize_resource=resource_policy,
         action=InvestigationAction.CONTINUE,
     )

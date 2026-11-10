@@ -4,9 +4,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 
 from risk_platform.agents.investigation import InvestigationAgent
+from risk_platform.workflow import planning, phase_execution
+from risk_platform.workflow.checkpoints import to_checkpoint_data
 from risk_platform.workflow.contracts import InitialPlanningInput
 from risk_platform.workflow.runtime import InvestigationAction, check_runtime
-from risk_platform.workflow.knowledge_tool import knowledge_execution, knowledge_authorizer
 from risk_platform.workflow.nodes import (
     observation,
     replanning,
@@ -26,47 +27,51 @@ def _route_after_replanning(
 
 def build_investigation_graph(
     investigation_agent: InvestigationAgent, *,
-    session_factory, checkpointer, embedding_client=None, milvus_client=None,
+    session_factory, checkpointer,
 ):
     """持久化 runner 内部使用的唯一拓扑，不提供无账本执行入口。"""
     if session_factory is None or checkpointer is None:
         raise ValueError("正式执行必须配置账本会话与检查点存储")
 
-    def invocation(runtime):
+    def require_run_context(runtime):
         # 声明类型与实际调用一致，不再兼容裸 InvestigationRuntimeContext。
         return require_invocation(runtime.context, claimed=True)
 
-    def wire_update(update, call):
-        from risk_platform.workflow.recovery import _wire
-        return _wire(update)
-
+    # 它把两项依赖交给账本适配器：
+    # session_factory：访问账本数据库；
+    # call.execution：本轮运行身份、运行锁、代次和重试策略。
     def phase_executor(call):
-        from risk_platform.workflow.recovery import ledger_phase_executor
-        return ledger_phase_executor(session_factory, call.execution)
+        return phase_execution.ledger_phase_executor(session_factory, call.execution, runtime=call.runtime, agent=investigation_agent)
 
+    # LangGraph 传入 runtime
+    #     ↓
+    # 取出 runtime.context
+    #     ↓
+    # 检查调用包装与内部执行信息
+    #     ↓
+    # 返回给变量 call
+# call.runtime     # 身份、案件、工具绑定
+# call.execution   # 运行规格、guard、重试策略
     async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = invocation(runtime)
-        from risk_platform.workflow.recovery import prepare_plan
-        return await prepare_plan(state, call.execution, sessions=session_factory, agent=investigation_agent)
+        call = require_run_context(runtime)
+        return await planning.prepare_plan(state, call.execution, sessions=session_factory, agent=investigation_agent, runtime=call.runtime)
 
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = invocation(runtime)
+        call = require_run_context(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
-        trusted = knowledge_execution(call.runtime, InvestigationAction.CONTINUE, source)
-        update = await task_execution(state, investigation_agent=investigation_agent, execution_context=trusted,
-                                    authorize=knowledge_authorizer(call.runtime), session_factory=session_factory,
-                                    embedding_client=embedding_client, milvus_client=milvus_client,
-                                    before_task=lambda: check_runtime(call.runtime, InvestigationAction.CONTINUE, source),
+        #进入任务执行前，核对“当前身份是否允许继续调查，以及 State 中的调查输入是否与可信案件一致”
+        check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        update = await task_execution(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
                                     execute_phase=phase_executor(call))
-        return wire_update(update, call)
+        return to_checkpoint_data(update)
 
     async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = invocation(runtime)
+        call = require_run_context(runtime)
         source = InitialPlanningInput.model_validate(state["planning_input"])
-        trusted = knowledge_execution(call.runtime, InvestigationAction.CONTINUE, source)
-        update = await observation(state, investigation_agent=investigation_agent, execution_context=trusted,
+        check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        update = await observation(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
                                  execute_phase=phase_executor(call))
-        return wire_update(update, call)
+        return to_checkpoint_data(update)
 
     graph = StateGraph(InvestigationState, context_schema=InvestigationInvocation)
     graph.add_node("prepare_plan", plan_node)
