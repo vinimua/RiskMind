@@ -7,6 +7,17 @@ from risk_platform.workflow.persistence.contracts import canonical_json, input_d
 from risk_platform.memory.contracts import MemoryRecord, MemoryScope
 from .contracts import ChatResponse
 from .models import ConversationRow, ChatTurnRow
+from typing import Literal
+from pydantic import Field
+from risk_platform.memory.contracts import MemoryContract, Identity, NonBlank
+
+
+class _LegacyIntent(MemoryContract):
+    """仅校验已落库 AUTO 历史，不参与执行。"""
+    intent: Literal["CHAT", "READ_INVESTIGATION", "START_INVESTIGATION", "CLARIFY"]
+    investigation_id: Identity | None = None
+    model_id: Identity | None = None
+    clarification: NonBlank | None = Field(default=None, max_length=1000)
 
 
 class ChatConflictError(ValueError):
@@ -75,7 +86,7 @@ async def claim_turn(session, request, *, actor, authorize_conversation):
     if active is not None:
         raise ChatBusyError("同一会话已有未结束请求")
     session.add(ChatTurnRow(turn_id=turn_id, conversation_id=conversation_id, actor_id=actor,
-        request_digest=input_digest(request), action=request.action, user_text=request.message, status="STARTED"))
+        request_digest=input_digest(request), action="ENTRY_DECISION", user_text=request.message, status="STARTED"))
     await session.flush()
     return conversation_id, turn_id, None
 
@@ -83,10 +94,27 @@ async def claim_turn(session, request, *, actor, authorize_conversation):
 async def history_and_memories(session, conversation_id, actor):
     rows = list(await session.scalars(select(ChatTurnRow).where(
         ChatTurnRow.conversation_id == conversation_id, ChatTurnRow.actor_id == actor,
-        ChatTurnRow.status == "SUCCEEDED", ChatTurnRow.action == "CHAT").order_by(ChatTurnRow.created_at.desc(), ChatTurnRow.turn_id).limit(10)))
+        ChatTurnRow.status == "SUCCEEDED", ChatTurnRow.action.in_(("CHAT", "AUTO", "ENTRY_DECISION"))).order_by(ChatTurnRow.created_at.desc(), ChatTurnRow.turn_id).limit(10)))
     history, memories = [], []
     for row in reversed(rows):
         response = read_response(row)
+        if row.action == "ENTRY_DECISION":
+            from .models import EntryDecisionRow
+            from .action_repository import read_decision
+            from .contracts import ChatDraft
+            decision_row = await session.get(EntryDecisionRow, row.turn_id)
+            if decision_row is None:
+                raise ChatConflictError("新入口回答缺少可靠决策")
+            if not isinstance(read_decision(decision_row, row), ChatDraft):
+                continue  # 工具结果不通过聊天历史绕过案件鉴权。
+        if row.action == "AUTO":
+            if row.intent_payload is None:
+                raise ChatConflictError("自动路由结果缺少意图记录")
+            intent = _LegacyIntent.model_validate_json(row.intent_payload)
+            if input_digest(intent) != row.intent_digest:
+                raise ChatConflictError("意图记录摘要不一致")
+            if intent.intent not in ("CHAT", "CLARIFY"):
+                continue  # 案件结果不能经普通聊天历史绕过案件 READ 授权。
         # 当前仅近期窗口和字符限制；不声称已经实现全 Prompt token 预算。
         history.extend(({"role": "user", "content": row.user_text[:2000]},
                         {"role": "assistant", "content": response.answer[:2000]}))

@@ -25,7 +25,8 @@ def _monitoring_alert() -> MonitoringAlert:
         model_id="credit_v3",
         metric="KS",
         symptom="DEGRADATION",
-        time_window="2026-09",
+        window_start=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        window_end=datetime(2026, 10, 1, tzinfo=timezone.utc),
         current_value=0.31,
         reference_value=0.42,
         triggered_at=datetime(2026, 10, 1, tzinfo=timezone.utc),
@@ -94,3 +95,43 @@ def test_capability_types_round_trip_through_json() -> None:
         restored = InvestigationTask.model_validate_json(task.model_dump_json())
 
         assert restored.capability is capability
+
+
+@pytest.mark.parametrize("changes", [
+    {"window_end": "2026-09-01T00:00:00Z"},
+    {"window_end": "2026-08-01T00:00:00Z"},
+    {"window_start": "2026-09-01T00:00:00"},
+    {"current_value": float("nan")},
+])
+def test_alert_rejects_invalid_window_and_values(changes):
+    data = _monitoring_alert().model_dump(mode="json")
+    with pytest.raises(ValidationError): MonitoringAlert.model_validate({**data, **changes})
+
+
+def test_alert_normalizes_offsets_for_stable_digest():
+    from risk_platform.workflow.persistence.contracts import input_digest
+    alert = _monitoring_alert()
+    data = alert.model_dump(mode="json")
+    shifted = MonitoringAlert.model_validate({**data,
+        "window_start": "2026-09-01T08:00:00+08:00",
+        "window_end": "2026-10-01T08:00:00+08:00",
+        "triggered_at": "2026-10-01T08:00:00+08:00"})
+    assert input_digest(shifted) == input_digest(alert)
+
+
+def test_legacy_alert_roundtrip_keeps_historical_payload_and_digest():
+    import json
+    from risk_platform.workflow.persistence.contracts import InvestigationRecord, canonical_json, input_digest
+    data = _monitoring_alert().model_dump(mode="json")
+    data.pop("window_start"); data.pop("window_end")
+    data["time_window"] = "2026-09"
+    old = {"user_query": None, "monitoring_alert": data,
+           "available_capabilities": ["KNOWLEDGE_RETRIEVAL"]}
+    source = InitialPlanningInput.model_validate(old)
+    assert json.loads(canonical_json(source)) == old
+    import hashlib
+    historical_json = json.dumps(old, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    assert input_digest(source) == hashlib.sha256(historical_json.encode("utf-8")).hexdigest()
+    record = InvestigationRecord(investigation_id="old", created_by="A", planning_input=source)
+    assert InvestigationRecord.model_validate_json(record.model_dump_json()) == record
+    with pytest.raises(ValidationError): MonitoringAlert.model_validate(data)

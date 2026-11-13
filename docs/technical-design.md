@@ -238,7 +238,8 @@ MonitoringAlert
 ├── model_id
 ├── metric
 ├── symptom
-├── time_window
+├── window_start
+├── window_end
 ├── current_value
 ├── reference_value
 └── triggered_at

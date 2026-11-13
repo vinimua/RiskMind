@@ -20,6 +20,7 @@ dev = ["pytest", "httpx"]
 database = ["sqlalchemy", "alembic", "psycopg[binary]"]
 worker = ["celery[redis]"]
 modelops = ["mlflow"]
+observability = ["langfuse>=4,<5"]
 knowledge = ["pymilvus==2.6.17"]
 recovery = ["langgraph-checkpoint-postgres>=2.0.25,<4", "psycopg[binary]"]
 
