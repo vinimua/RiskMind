@@ -12,9 +12,9 @@ from risk_platform.workflow.observation import RoundObservation, ExecutionObserv
 
 def observation(status="FAILED", outcome="EXECUTION_FAILED"):
     return RoundObservation(observation_id="O1", created_at=datetime.now(timezone.utc),
-        status="INCONCLUSIVE", execution_refs=("E1",),
+        status="INCONCLUSIVE", findings=(), unresolved_questions=(), action="STOP", stop_reason="No materials",
         execution_summaries=(ExecutionObservation(execution_id="E1", task_id="T1", status=status, outcome=outcome),),
-        narrative="尚未完成", error=ObservationError(code="NO_KNOWLEDGE", message="没有可解释资料"))
+        error=ObservationError(code="NO_KNOWLEDGE", message="没有可解释资料"))
 
 
 def memory(content="历史线索\n限制：当前未验证", investigation_id="I"):
@@ -87,13 +87,11 @@ def test_agent_receives_grouped_content_in_both_model_requests():
         assert "actor_id" not in payload and "authorize" not in payload
 
 
-def test_follow_ups_merge_gaps_and_suggestions_with_stable_exact_deduplication():
-    from risk_platform.workflow.observation import ObservationNote
-    note = lambda text: ObservationNote(text=text, execution_refs=("E1",))
+def test_follow_ups_preserve_unresolved_questions():
     source = observation().model_copy(update={"status": "SUCCEEDED", "error": None,
-        "knowledge_gaps": (note("标签成熟度待确认"), note("缺少版本背景")),
-        "next_step_suggestions": (note("补查版本背景"), note("标签成熟度待确认"))})
+        "unresolved_questions": ("Label maturity?", "Version change?"),
+        "action": "CONTINUE", "stop_reason": None})
     source = RoundObservation.model_validate_json(source.model_dump_json())
     record = extract_memory(investigation_id="I", source_result_id="result", observation=source)
-    assert record.content.follow_ups == ("标签成熟度待确认", "缺少版本背景", "补查版本背景")
-    assert record.content.item_count() == 4  # 一条执行摘要加三条后续事项。
+    assert record.content.follow_ups == ("Label maturity?", "Version change?")
+    assert record.content.item_count() == 3

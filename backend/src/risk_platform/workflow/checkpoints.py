@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from risk_platform.execution.contracts import TaskExecutionResult
 from risk_platform.workflow import access
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
-from risk_platform.workflow.observation import RoundObservation
+from risk_platform.workflow.observation import RoundObservation, read_observation
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.contracts import AcceptedPlan, OperationType, operation_identity_key, input_digest
 from risk_platform.workflow.persistence.models import AcceptedPlanRow, OperationRow
@@ -138,7 +138,7 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
             if len(results) != len(accepted.tasks):
                 raise ledger.LedgerIntegrityError("解释缺少完整执行事实")
             artifact = await selected(OperationType.OBSERVATION)
-            if artifact.observation != RoundObservation.model_validate(values["observation"]):
+            if artifact.observation != read_observation(values["observation"]):
                 raise ledger.LedgerIntegrityError("checkpoint 解释与账本不一致")
         if values.get("round_complete") and values.get("observation") is None:
             raise ledger.LedgerIntegrityError("checkpoint 未解释却宣称本轮完成")

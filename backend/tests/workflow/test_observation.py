@@ -61,20 +61,17 @@ def current(results):
 def draft(results):
     available = next(r for r in results if r.payload and r.payload.resolved.contexts)
     context = available.payload.resolved.contexts[0]
-    return {"execution_refs": [r.execution_id for r in results],
-            "findings": [{"statement": "历史案例中标签未成熟曾低估指标", "execution_refs": [available.execution_id],
-                          "sources": [{"execution_id": available.execution_id, "context_id": context.context_id,
-                                       "source": context.supporting_hits[0].source.model_dump(mode="json"),
-                                       "quote": "标签未成熟导致指标低估"}],
-                          "limitation": "这是历史案例，尚未验证当前案件的标签成熟度"}],
-            "knowledge_gaps": [{"text": "尚缺当前标签成熟度", "execution_refs": [available.execution_id]}],
-            "next_step_suggestions": [{"text": "建议后续获取当前标签成熟度", "execution_refs": [available.execution_id]}],
-            "narrative": "历史经验提示调查方向，但当前案件原因仍未确认。"}
+    return {"findings": [{"statement": "Historical labels can underestimate metrics; current case unverified",
+              "sources": [{"execution_id": available.execution_id, "context_id": context.context_id,
+                           "source": context.supporting_hits[0].source.model_dump(mode="json"),
+                           "quote": context.content}]}],
+            "unresolved_questions": ["Are current labels mature?"], "action": "CONTINUE"}
+
 
 
 def run(results, data=None, failure=None):
     class Agent:
-        def observe_knowledge_round(self, *_):
+        def observe_knowledge_round(self, *_, **__):
             if failure:
                 raise failure
             return KnowledgeObservationDraft.model_validate(data if data is not None else draft(results))
@@ -88,10 +85,36 @@ def test_mixed_results_keep_failure_facts_and_traceable_historical_finding():
     assert observed.status == "SUCCEEDED" and observed.error is None
     assert observed.knowledge_scope == "HISTORICAL_KNOWLEDGE_ONLY"
     assert [s.outcome for s in observed.execution_summaries] == ["KNOWLEDGE_AVAILABLE", "EXECUTION_FAILED", "EXECUTION_REJECTED", "NO_HITS"]
-    assert len(observed.knowledge_gaps) == 4  # 三项系统缺口 + 一项模型建议的信息缺口。
+    assert len(observed.execution_summaries) == 4 and observed.unresolved_questions  # 三项系统缺口 + 一项模型建议的信息缺口。
     source = observed.findings[0].sources[0]
     assert source.execution_id == "E0" and source.context_id == "P0" and source.source.chunk_id == "C0"
     assert observed.observation_id.startswith("obs-") and observed.created_at.tzinfo
+
+
+def test_planning_history_keeps_no_hits_failures_and_snapshot_separate():
+    from risk_platform.workflow.observation import summarize_previous_tasks
+    results = [execution(empty=True), execution(1, "FAILED"), execution(2, "REJECTED")]
+    values = summarize_previous_tasks(current(results)["investigation_plan"], results)
+    assert [v["outcome"] for v in values] == ["NO_HITS", "EXECUTION_FAILED", "EXECUTION_REJECTED"]
+    assert values[0]["request"]["query"] and values[0]["snapshot"]["route_version"] == 1
+    assert values[1]["error"]["code"] == "DEPENDENCY_FAILURE"
+    assert values[2]["request"] is None  # 未执行，不能伪造成功请求或数据快照。
+
+
+def test_old_observation_is_read_only_without_invented_action():
+    from risk_platform.workflow.observation import read_observation, LegacyRoundObservation
+    value = {
+        "observation_id": "old-O", "created_at": datetime.now(timezone.utc).isoformat(),
+        "status": "INCONCLUSIVE", "execution_refs": ["E"],
+        "execution_summaries": [{"execution_id": "E", "task_id": "T", "status": "FAILED",
+                                  "outcome": "EXECUTION_FAILED"}],
+        "findings": [], "knowledge_gaps": [], "next_step_suggestions": [],
+        "narrative": "Old historical record", "error": {"code": "FAILED", "message": "Failed"},
+    }
+    observed = read_observation(value)
+    assert isinstance(observed, LegacyRoundObservation)
+    assert not hasattr(observed, "action")
+    assert observed.model_dump(mode="json")["narrative"] == value["narrative"]
 
 
 @pytest.mark.parametrize("status,empty,outcome", [("SUCCEEDED", True, "NO_HITS"),
@@ -101,7 +124,7 @@ def test_no_available_knowledge_never_calls_explanation_model(status, empty, out
     result = execution(status=status, empty=empty)
     observed = run([result], failure=AssertionError("不应调用模型"))
     assert observed.status == "INCONCLUSIVE" and observed.error.code == "NO_KNOWLEDGE_AVAILABLE"
-    assert not observed.findings and not observed.next_step_suggestions
+    assert not observed.findings and observed.action == "STOP"
     assert observed.execution_summaries[0].outcome == outcome
 
 
@@ -111,11 +134,11 @@ def test_invalid_draft_rejects_entire_interpretation(fault):
     data = draft(results)
     finding = data["findings"][0]
     if fault == "unknown":
-        data["knowledge_gaps"][0]["execution_refs"] = ["old-round-execution"]
+        finding["sources"][0]["execution_id"] = "old-round-execution"
     elif fault == "duplicate":
-        data["execution_refs"] = ["E0", "E0", "E1"]
+        finding["sources"].append(dict(finding["sources"][0]))
     elif fault == "incomplete":
-        data["execution_refs"] = ["E0"]
+        finding["sources"] = []
     elif fault == "wrong-context":
         finding["sources"][0]["context_id"] = "OTHER"
     elif fault == "wrong-source":
@@ -123,11 +146,10 @@ def test_invalid_draft_rejects_entire_interpretation(fault):
     elif fault == "wrong-quote":
         finding["sources"][0]["quote"] = "不存在的引文"
     else:
-        finding["execution_refs"] = ["E1"]
         finding["sources"][0]["execution_id"] = "E1"
     observed = run(results, data)
     assert observed.status == "INCONCLUSIVE" and observed.error.code == "OBSERVATION_INVALID"
-    assert not observed.findings and not observed.next_step_suggestions
+    assert not observed.findings and observed.action == "STOP"
 
 
 @pytest.mark.parametrize("field", ["observation_id", "status", "created_at", "root_cause", "hypotheses", "evidence"])
@@ -173,7 +195,7 @@ def test_actual_deadline_without_partial_output():
     import time
     results = [execution()]
     class Slow:
-        def observe_knowledge_round(self, *_):
+        def observe_knowledge_round(self, *_, **__):
             time.sleep(.04)
             return KnowledgeObservationDraft.model_validate(draft(results))
     ctx = KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD, timeout_seconds=.001)
@@ -195,7 +217,7 @@ def test_business_observation_does_not_close_case_or_change_execution_results(mo
             return pending
         def formulate_tool_call(self, *_, **__):
             return tool_call({"query": "具体问题", "top_k": 1})
-        def observe_knowledge_round(self, *_):
+        def observe_knowledge_round(self, *_, **__):
             if bad_model:
                 raise ValueError("private")
             return KnowledgeObservationDraft.model_validate(draft(results))
@@ -230,7 +252,7 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
     results = [execution()]
     original_text = results[0].payload.resolved.contexts[0].content
     class MutatingAgent:
-        def observe_knowledge_round(self, plan, supplied):
+        def observe_knowledge_round(self, plan, supplied, **options):
             # 模拟调用方代码误改模型嵌套对象；系统校验仍须对照原输入，而非此副本。
             supplied[0].payload.resolved.contexts[0].supporting_hits[0].source.document_version = "forged"
             data = draft(supplied)

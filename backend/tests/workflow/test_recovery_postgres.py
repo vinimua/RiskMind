@@ -64,15 +64,16 @@ class Agent:
             raise ValueError("invalid model output")
         return tool_call(KnowledgeSearchToolRequest(query="Query " + task.task_id, top_k=1))
 
-    def observe_knowledge_round(self, plan, results):
+    def observe_knowledge_round(self, plan, results, **options):
         self.events.append("observation")
-        return KnowledgeObservationDraft(execution_refs=tuple(row.execution_id for row in results), findings=tuple({
-            "statement": "历史案例提供调查线索", "execution_refs": (row.execution_id,),
+        return KnowledgeObservationDraft(findings=tuple({
+            "statement": "Historical knowledge only; current case unverified",
             "sources": ({"execution_id": row.execution_id, "context_id": row.payload.resolved.contexts[0].context_id,
-                "source": row.payload.resolved.contexts[0].supporting_hits[0].source, "quote": "历史案例"},),
-            "limitation": "仅为历史经验，当前案件尚未验证",
-        } for row in results if row.payload and row.payload.resolved.contexts), knowledge_gaps=(),
-            next_step_suggestions=(), narrative="历史经验不能直接确认为当前根因")
+                "source": row.payload.resolved.contexts[0].supporting_hits[0].source,
+                "quote": row.payload.resolved.contexts[0].content},),
+        } for row in results if row.payload and row.payload.resolved.contexts),
+            unresolved_questions=(), action="STOP", stop_reason="Knowledge round finished")
+
 
 
 @asynccontextmanager

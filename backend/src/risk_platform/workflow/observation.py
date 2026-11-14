@@ -26,7 +26,7 @@ class ObservationSource(ObservationContract):
     quote: _NonBlankString  # 必须完整出现在所引用 Context 中，不拼接多份正文。
 
 
-class KnowledgeFinding(ObservationContract):
+class LegacyKnowledgeFinding(ObservationContract):
     statement: _NonBlankString
     execution_refs: tuple[_NonBlankString, ...] = Field(min_length=1)
     sources: tuple[ObservationSource, ...] = Field(min_length=1)
@@ -38,14 +38,28 @@ class ObservationNote(ObservationContract):
     execution_refs: tuple[_NonBlankString, ...] = Field(min_length=1)
 
 
-class KnowledgeObservationDraft(ObservationContract):
-    """模型只能提出解释和引用，不能生成可信 observation_id、状态或执行事实。"""
+class KnowledgeFinding(ObservationContract):
+    statement: _NonBlankString = Field(max_length=4000)
+    sources: tuple[ObservationSource, ...] = Field(min_length=1, max_length=32)
 
-    execution_refs: tuple[_NonBlankString, ...] = Field(min_length=1)
-    findings: tuple[KnowledgeFinding, ...]
-    knowledge_gaps: tuple[ObservationNote, ...]
-    next_step_suggestions: tuple[ObservationNote, ...]
-    narrative: _NonBlankString
+
+class KnowledgeObservationDraft(ObservationContract):
+    """模型提出解释和推进建议，不填写系统身份或重复的执行 ID。"""
+    findings: tuple[KnowledgeFinding, ...] = Field(max_length=64)
+    unresolved_questions: tuple[_NonBlankString, ...] = Field(max_length=64)
+    action: Literal["CONTINUE", "STOP"]
+    stop_reason: _NonBlankString | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> Self:
+        questions = [q.strip() for q in self.unresolved_questions]
+        if len(questions) != len(set(questions)) or any(len(q) > 2000 for q in questions):
+            raise ValueError("未解决问题不能重复或超过长度限制")
+        if self.action == "CONTINUE" and (not questions or self.stop_reason is not None):
+            raise ValueError("继续必须有未解决问题，且不能包含停止原因")
+        if self.action == "STOP" and self.stop_reason is None:
+            raise ValueError("停止必须说明原因")
+        return self
 
 
 class ExecutionObservation(ObservationContract):
@@ -62,7 +76,7 @@ class ObservationError(ObservationContract):
     message: _NonBlankString
 
 
-class RoundObservation(ObservationContract):
+class LegacyRoundObservation(ObservationContract):
     observation_id: _NonBlankString
     created_at: AwareDatetime
     status: Literal["SUCCEEDED", "INCONCLUSIVE"]
@@ -70,7 +84,7 @@ class RoundObservation(ObservationContract):
     knowledge_scope: Literal["HISTORICAL_KNOWLEDGE_ONLY"] = "HISTORICAL_KNOWLEDGE_ONLY"
     execution_refs: tuple[_NonBlankString, ...] = Field(min_length=1)
     execution_summaries: tuple[ExecutionObservation, ...] = Field(min_length=1)
-    findings: tuple[KnowledgeFinding, ...] = ()
+    findings: tuple[LegacyKnowledgeFinding, ...] = ()
     knowledge_gaps: tuple[ObservationNote, ...] = ()
     next_step_suggestions: tuple[ObservationNote, ...] = ()
     narrative: _NonBlankString
@@ -87,6 +101,34 @@ class RoundObservation(ObservationContract):
         ids = [summary.execution_id for summary in self.execution_summaries]
         if len(ids) != len(set(ids)) or tuple(ids) != self.execution_refs:
             raise ValueError("系统执行摘要必须与本轮执行引用逐项对应")
+        return self
+
+
+class RoundObservation(KnowledgeObservationDraft):
+    """v2 正式解释；action 是建议，不授予下一轮运行权。"""
+    schema_version: Literal[2] = 2
+    observation_id: _NonBlankString
+    created_at: AwareDatetime
+    status: Literal["SUCCEEDED", "INCONCLUSIVE"]
+    knowledge_scope: Literal["HISTORICAL_KNOWLEDGE_ONLY"] = "HISTORICAL_KNOWLEDGE_ONLY"
+    execution_summaries: tuple[ExecutionObservation, ...] = Field(min_length=1)
+    error: ObservationError | None = None
+
+    @property
+    def execution_refs(self):
+        # 完整执行集合由系统摘要推导，不要求模型重复填写。
+        return tuple(item.execution_id for item in self.execution_summaries)
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> Self:
+        if len(set(self.execution_refs)) != len(self.execution_refs):
+            raise ValueError("执行摘要身份不能重复")
+        if self.status == "SUCCEEDED" and self.error is not None:
+            raise ValueError("成功解释不能包含错误")
+        if self.status == "INCONCLUSIVE" and (
+            self.error is None or self.findings or self.action != "STOP"
+        ):
+            raise ValueError("解释失败必须停止，不能保留部分发现")
         return self
 
 
@@ -128,9 +170,12 @@ def summarize_executions(results):
     return tuple(summaries), tuple(gaps)
 
 
-def build_observation_input(plan, results):
+def build_observation_input(plan, results, *, planning_input=None, previous_observations=(), available_capabilities=()):
     """只向解释模型提供本轮任务与实际知识/错误，不提供授权器和操作者身份。"""
     return {
+        "original_input": planning_input.model_dump(mode="json") if planning_input is not None else None,
+        "previous_observations": [o.model_dump(mode="json") for o in previous_observations],
+        "available_capabilities": list(available_capabilities),
         "goal": plan.goal,
         "tasks": [{"task_id": t.task_id, "objective": t.objective, "expected_result": t.expected_result}
                   for t in plan.tasks],
@@ -139,24 +184,31 @@ def build_observation_input(plan, results):
     }
 
 
+def summarize_previous_tasks(plan, results):
+    """按真实任务与执行结果组装规划材料；保留零命中、错误及数据快照。"""
+    plan, results = validate_round_inputs(plan, results)
+    summaries, _ = summarize_executions(results)
+    return [dict(
+        task_id=task.task_id, objective=task.objective, expected_result=task.expected_result,
+        execution_id=result.execution_id, status=result.status.value, outcome=summary.outcome,
+        tool_name="knowledge_search" if result.payload is not None else None,
+        request=result.payload.request.model_dump(mode="json") if result.payload is not None else None,
+        snapshot=result.payload.retrieved.snapshot.model_dump(mode="json") if result.payload is not None else None,
+        error=result.error.model_dump(mode="json") if result.error is not None else None,
+        completed_at=result.completed_at.isoformat(),
+    ) for task, result, summary in zip(plan.tasks, results, summaries, strict=True)]
+
+
 def validate_observation_draft(draft: KnowledgeObservationDraft, results):
     """机械验证引用存在和来源归属；不声称可证明自然语言陈述的语义蕴含。"""
     draft = KnowledgeObservationDraft.model_validate_json(draft.model_dump_json())
     by_id = {r.execution_id: r for r in results}
 
-    def check_refs(refs):
-        if len(refs) != len(set(refs)) or not set(refs) <= set(by_id):
-            raise ObservationIntegrityError("解释引用必须唯一且属于当前轮次")
-
-    check_refs(draft.execution_refs)
-    if set(draft.execution_refs) != set(by_id):
-        raise ObservationIntegrityError("解释必须声明当前轮次全部执行记录，不能隐去失败")
     for finding in draft.findings:
-        check_refs(finding.execution_refs)
-        if set(finding.execution_refs) != {s.execution_id for s in finding.sources}:
-            raise ObservationIntegrityError("发现的执行引用必须与来源引用对应")
         seen_sources = set()
         for source in finding.sources:
+            if source.execution_id not in by_id:
+                raise ObservationIntegrityError("发现引用不属于当前轮次")
             result = by_id[source.execution_id]
             if result.status != ExecutionStatus.SUCCEEDED:
                 raise ObservationIntegrityError("失败或拒绝执行不能支持历史知识发现")
@@ -170,27 +222,28 @@ def validate_observation_draft(draft: KnowledgeObservationDraft, results):
             if key in seen_sources:
                 raise ObservationIntegrityError("发现中的来源引用不能重复")
             seen_sources.add(key)
-    for note in (*draft.knowledge_gaps, *draft.next_step_suggestions):
-        check_refs(note.execution_refs)
     return draft
 
 
 def complete_observation(results, draft):
     draft = validate_observation_draft(draft, results)
-    summaries, gaps = summarize_executions(results)
+    summaries, _ = summarize_executions(results)
     return RoundObservation(
         observation_id="obs-" + uuid4().hex, created_at=datetime.now(timezone.utc), status="SUCCEEDED",
-        execution_refs=tuple(r.execution_id for r in results), execution_summaries=summaries,
-        findings=draft.findings, knowledge_gaps=gaps + draft.knowledge_gaps,
-        next_step_suggestions=draft.next_step_suggestions, narrative=draft.narrative,
+        execution_summaries=summaries, **draft.model_dump(),
     )
 
 
 def inconclusive_observation(results, code, message):
-    summaries, gaps = summarize_executions(results)
+    summaries, _ = summarize_executions(results)
     return RoundObservation(
         observation_id="obs-" + uuid4().hex, created_at=datetime.now(timezone.utc), status="INCONCLUSIVE",
-        execution_refs=tuple(r.execution_id for r in results), execution_summaries=summaries,
-        knowledge_gaps=gaps, narrative="本轮尚未形成通过校验的知识解释，不能据此确认当前案件根因。",
-        error=ObservationError(code=code, message=message),
+        execution_summaries=summaries, findings=(), unresolved_questions=(), action="STOP",
+        stop_reason=message, error=ObservationError(code=code, message=message),
     )
+
+
+def read_observation(value):
+    """仅历史回查接受旧格式，不为旧记录伪造推进建议。"""
+    contract = RoundObservation if value.get("schema_version") == 2 else LegacyRoundObservation
+    return contract.model_validate(value)

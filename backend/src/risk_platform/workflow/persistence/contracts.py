@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, TypeAdapte
 
 from risk_platform.execution.contracts import KnowledgeExecutionContext, KnowledgeSearchToolRequest, TaskExecutionResult
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, TaskStatus
-from risk_platform.workflow.observation import RoundObservation
+from risk_platform.workflow.observation import RoundObservation, LegacyRoundObservation
 
 
 Identity = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=128, pattern=r"^\S+$")]
@@ -118,7 +118,7 @@ class CommittedArtifact(LedgerContract):
     """一种产物恰好占一个字段；effective request 保留在 execution.payload.request。"""
     query_request: KnowledgeSearchToolRequest | None = None
     execution: TaskExecutionResult | None = None
-    observation: RoundObservation | None = None
+    observation: RoundObservation | LegacyRoundObservation | None = None
 
     @model_validator(mode="after")
     def exactly_one(self) -> Self:

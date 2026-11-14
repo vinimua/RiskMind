@@ -247,11 +247,14 @@ async def _validate_artifact(session, operation, artifact):
         if observation.execution_summaries != summaries:
             raise LedgerIntegrityError("解释系统摘要与真实执行记录不一致")
         if observation.status == "SUCCEEDED":
+            # 新提交只接受 v2；旧格式由 read_artifact 保持原文回查。
+            if getattr(observation, "schema_version", None) != 2:
+                raise LedgerIntegrityError("旧 Observation 只读，不能作为新解释提交")
             validate_observation_draft(KnowledgeObservationDraft(
-                execution_refs=observation.execution_refs, findings=observation.findings,
-                knowledge_gaps=observation.knowledge_gaps, next_step_suggestions=observation.next_step_suggestions,
-                narrative=observation.narrative,
+                findings=observation.findings, unresolved_questions=observation.unresolved_questions,
+                action=observation.action, stop_reason=observation.stop_reason,
             ), results)
+
 
 
 async def commit_result(session: AsyncSession, attempt_id: str, result_id: str, artifact: CommittedArtifact) -> ResultRow:

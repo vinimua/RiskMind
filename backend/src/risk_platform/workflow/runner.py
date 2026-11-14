@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 from risk_platform.execution.contracts import TaskExecutionResult
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan
-from risk_platform.workflow.observation import RoundObservation
+from risk_platform.workflow.observation import RoundObservation, read_observation
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.models import AcceptedPlanRow
 from risk_platform.workflow.persistence.recovery_contracts import RunIdentity, RecoveryPolicy
@@ -96,4 +96,4 @@ class InvestigationRunner:
                 planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
                 investigation_plan=InvestigationPlan.model_validate(output["investigation_plan"]),
                 task_execution_results=[TaskExecutionResult.model_validate(row) for row in output["task_execution_results"]],
-                observation=RoundObservation.model_validate(output["observation"]), round_complete=True, investigation_status="OPEN")
+                observation=read_observation(output["observation"]), round_complete=True, investigation_status="OPEN")

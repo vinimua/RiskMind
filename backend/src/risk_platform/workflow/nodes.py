@@ -175,7 +175,7 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
     plan, results = validate_round_inputs(plan, results)
     async def explain():
         update = await _interpret_observation(
-            dict(investigation_plan=plan, task_execution_results=results),
+            dict(planning_input=state["planning_input"], investigation_plan=plan, task_execution_results=results),
             investigation_agent=investigation_agent, runtime_context=runtime_context,
         )
         return update["observation"]
@@ -201,6 +201,11 @@ async def _interpret_observation(
             draft = await asyncio.to_thread(
                 investigation_agent.observe_knowledge_round, plan.model_copy(deep=True),
                 [result.model_copy(deep=True) for result in results],
+                planning_input=_business_model(InitialPlanningInput, state["planning_input"]).model_copy(deep=True),
+                available_capabilities=tuple(
+                    capability for capability in _business_model(InitialPlanningInput, state["planning_input"]).available_capabilities
+                    if any(tool_definition(binding.name).capability == capability for binding in runtime_context.tools)
+                ),
             )
         output = complete_observation(results, draft)
     except (TimeoutError, APITimeoutError):

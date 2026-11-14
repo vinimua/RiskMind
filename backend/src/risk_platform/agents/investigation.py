@@ -38,44 +38,15 @@ class InvestigationAgent:
         self.client = client
         self.model = model
 
-    def replan(self, value, *, input_limit: int, context_window: int,
-               output_tokens: int, safety_tokens: int):
-        """生成补查建议；不执行、不接受下一轮、不修改本轮材料。
-
-        预算由组合入口显式传入，不猜测模型窗口。必要材料超限直接失败，
-        不截断 Observation；模型/网络失败交给后续持久化阶段处理。
-        """
-        from risk_platform.core.token_budget import check_request_budget
-        from risk_platform.workflow.replanning import (
-            ReplanningInput, StopInvestigation, REPLANNING_DECISION, REPLANNING_PROMPT,
-        )
-
-        value = ReplanningInput.model_validate_json(value.model_dump_json())
-        if value.remaining_rounds == 0:
-            return StopInvestigation(action="STOP", reason="调查轮次预算已耗尽；不代表根因已确认")
-        messages = [
-            {"role": "system", "content": REPLANNING_PROMPT},
-            {"role": "user", "content": value.model_dump_json()},
-        ]
-        check_request_budget(messages, input_limit=input_limit, context_window=context_window,
-                             output_tokens=output_tokens, safety_tokens=safety_tokens)
-        response = self.client.chat.completions.create(
-            model=self.model, messages=messages, max_tokens=output_tokens,
-            response_format={"type": "json_object"},
-        )
-        choice = response.choices[0]
-        if choice.finish_reason != "stop" or not choice.message.content:
-            raise ValueError("Replanning 未完整返回，不能接受部分决定")
-        return REPLANNING_DECISION.validate_json(choice.message.content)
-
-    def observe_knowledge_round(self, plan, results):
+    def observe_knowledge_round(self, plan, results, *, planning_input=None, previous_observations=(), available_capabilities=()):
         """只解释本轮真实结果；系统会再次校验所有引用，不赋予当前根因结论资格。"""
         from risk_platform.workflow.observation import KnowledgeObservationDraft, build_observation_input
 
         response = self.client.chat.completions.create(
             model=self.model,
             messages=[{"role": "system", "content": KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT},
-                      {"role": "user", "content": json.dumps(build_observation_input(plan, results), ensure_ascii=False)}],
+                      {"role": "user", "content": json.dumps(build_observation_input(plan, results, planning_input=planning_input,
+                          previous_observations=previous_observations, available_capabilities=available_capabilities), ensure_ascii=False)}],
             response_format={"type": "json_object"},
         )
         choice = response.choices[0]
@@ -123,7 +94,7 @@ class InvestigationAgent:
     def initial_plan(
         self,
         planning_input: InitialPlanningInput,
-        *, memory_context=None,
+        *, memory_context=None, previous_observations=(), previous_tasks=(), remaining_task_budget=None,
     ) -> InvestigationPlan:
         """Plan the knowledge needed for the first investigation round."""
 
@@ -133,6 +104,18 @@ class InvestigationAgent:
             )
 
         context_payload = json.loads(build_initial_planning_context(planning_input))
+        # 保留各份 Observation 来源；单个 Agent 的 STOP 不是全局停止。
+        if previous_observations:
+            from risk_platform.workflow.observation import RoundObservation
+            observations = [RoundObservation.model_validate_json(o.model_dump_json()) for o in previous_observations]
+            if len({o.observation_id for o in observations}) != len(observations):
+                raise ValueError("规划来源 Observation 不能重复")
+            if remaining_task_budget is None or type(remaining_task_budget) is not int or remaining_task_budget <= 0:
+                raise ValueError("后续规划必须提供正整数任务预算")
+            context_payload["observations"] = [o.model_dump(mode="json") for o in observations]
+            context_payload["previous_tasks"] = list(previous_tasks)
+            context_payload["remaining_task_budget"] = remaining_task_budget
+
         if memory_context is not None:
             from risk_platform.memory.context import model_context
             context_payload["historical_memory"] = model_context(memory_context)
@@ -159,6 +142,8 @@ class InvestigationAgent:
             raise ValueError("初始计划生成失败,模型没有返回任何内容")
 
         draft = _InitialPlanDraft.model_validate_json(content)
+        if remaining_task_budget is not None and len(draft.tasks) > remaining_task_budget:
+            raise ValueError("候选任务超过剩余预算")
         return InvestigationPlan(
             goal=draft.goal,
             tasks=[

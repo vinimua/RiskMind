@@ -109,7 +109,7 @@ def test_observation_needs_generic_identity_not_knowledge_binding(monkeypatch):
     source = current(results)
     runtime = replace(make_runtime(source["planning_input"]), tools=())
     class Agent:
-        def observe_knowledge_round(self, *_):
+        def observe_knowledge_round(self, *_, **__):
             from risk_platform.workflow.observation import KnowledgeObservationDraft
             return KnowledgeObservationDraft.model_validate(draft(results))
     output = asyncio.run(nodes.observation(source, investigation_agent=Agent(), runtime_context=runtime, execute_phase=run_phase))

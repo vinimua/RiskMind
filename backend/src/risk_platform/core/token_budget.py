@@ -9,7 +9,10 @@ def estimate_tokens(text: str) -> int:
 
     非 ASCII 字符也计入，避免中文以外的文本被正则漏掉。误差由调用方
     配置的安全余量缓冲；最终真实用量仍以供应商 usage 为准。
-    """
+     """
+# 它实际采用两套规则：
+# - 英文字母、数字等连续字符串：大约每 4 个字符算 1 个 Token。
+# - 中文、标点、其他 Unicode 字符：每个字符算 1 个 Token。
     parts = re.findall(r"[A-Za-z0-9_-]+|[^\s]", text)
     return sum(max(1, (len(part) + 3) // 4) if part.isascii() and
                re.fullmatch(r"[A-Za-z0-9_-]+", part) else 1 for part in parts)
