@@ -99,3 +99,21 @@ def test_knowledge_dependencies_are_resolved_from_current_binding(monkeypatch, a
     json.dumps(tools.tool_declarations(task.capability))
     json.dumps(binding.execution.model_dump(mode="json"))
     assert "embedding_client=" not in repr(binding) and "session_factory=" not in repr(binding)
+
+def test_required_tool_mode_is_used_by_request_and_digest(monkeypatch):
+    from types import SimpleNamespace as NS
+    from risk_platform.agents.investigation import InvestigationAgent
+    calls=[]
+    response=NS(choices=[NS(finish_reason="tool_calls",message=NS(content=None,tool_calls=[
+        NS(id="call-test",type="function",function=NS(name="knowledge_search",arguments='{"query":"history","top_k":1}'))]))])
+    def create(**kwargs): calls.append(kwargs);return response
+    agent=InvestigationAgent(NS(chat=NS(completions=NS(create=create))),"test-model")
+    task=state(1)["investigation_plan"].tasks[0]
+    call=agent.formulate_tool_call(task,state()["planning_input"],goal="test",
+        tools=tools.tool_declarations(task.capability),tool_limits={"knowledge_search":{"max_top_k":5}})
+    assert call.tool_name=="knowledge_search"
+    assert calls[0]["tool_choice"]=="required" and calls[0]["parallel_tool_calls"] is False
+    assert calls[0]["extra_body"]=={"thinking":{"type":"disabled"}}
+    digest=tools.query_contract_digest("prompt")
+    monkeypatch.setattr(tools,"required_tool_options",lambda:{"tool_choice":"required","parallel_tool_calls":False})
+    assert tools.query_contract_digest("prompt")!=digest

@@ -1,0 +1,29 @@
+{
+  "count": 50,
+  "dev_count": 15,
+  "incident_count": 35,
+  "qa_count": 150,
+  "all_h1_match_titles": true,
+  "all_required_sections": true,
+  "cross_model_versions_valid": true,
+  "all_quotes_exact": true,
+  "min_doc_chars": 3580,
+  "max_doc_chars": 5003,
+  "total_doc_chars": 224151,
+  "incident_categories": {
+    "LABEL_MATURITY": 6,
+    "DATA_QUALITY": 6,
+    "CHANNEL_MIX": 6,
+    "DISTRIBUTION_DRIFT": 6,
+    "VERSION_MISMATCH": 5,
+    "TRUE_DETERIORATION": 4,
+    "INCONCLUSIVE": 2
+  },
+  "statuses": {
+    "CONFIRMED": 29,
+    "INCONCLUSIVE": 3,
+    "PARTIALLY_CONFIRMED": 3
+  },
+  "unique_sha256_count": 50,
+  "notes": "Only static consistency checks; no real PG/Milvus ingestion, real LLM generation or expert validation performed."
+}

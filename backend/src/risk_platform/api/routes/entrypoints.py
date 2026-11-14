@@ -51,10 +51,12 @@ def entry_response(view):
             "FORBIDDEN": 403, "NOT_FOUND": 404, "CONFLICT": 409}.get(view.result.error_code, 503)
     return JSONResponse(status_code=status, content=view.model_dump(mode="json"))
 
-
+# Depends(principal) 表示：FastAPI 先执行 principal()，把它返回的用户身份传给 actor，再执行 chat()。
 @router.post("/chat/messages")
 async def chat(body: ChatRequest, request: Request, actor: str = Depends(principal)):
     return entry_response(await invoke(request.app.state.entry_services.chat(body, actor=actor)))
+# 当前是单用户本地模式：正确 Token 对应配置里的固定用户。actor 不是 Token，也不是 Agent，而是“这次请求由谁发起”的身份。
+# “单用户本地模式”就是：当前启动的后端，只认配置里的一个用户和一个 Token。
 
 # | 编号 | 标识什么 |
 # |---|---|

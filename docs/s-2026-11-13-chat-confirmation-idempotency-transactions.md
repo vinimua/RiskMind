@@ -651,3 +651,376 @@ Outbox 用于避免“确认已保存，但消息未发送就崩溃”；投递�
 - [真实数据库与 HTTP 测试](../backend/tests/workflow/test_entry_actions_postgres.py)。
 - [入口使用指南](entrypoints-guide.md)。
 - [单次决策阶段审阅](chat-entry-decision-review.md)。
+
+
+
+
+
+现在这条链路已经实测通过，之前的 `402／30001` 阻塞已解除。下面按**当前实际代码**展开。注释 1
+
+**1．先看完整路线**
+
+```
+启动应用：bootstrap.py 组装客户端、数据库、Runner、工具
+                         │
+用户发送 POST /chat/messages
+                         ↓
+principal：认证用户，得到 actor
+                         ↓
+EntryServices.chat()
+                         ↓
+prepare_entry()
+  保存用户消息 → 加载聊天历史与记忆 → ChatAgent.decide()
+                         │
+             一次 DeepSeek 模型决策
+                         │
+       ┌─────────────────┼────────────────────┐
+       ↓                 ↓                    ↓
+普通回答／追问        查询案件进度           建议启动调查
+保存回答与记忆        鉴权 → 读取账本         保存建议，等待确认
+返回                  返回进度                    ↓
+                              POST /chat/turns/{turn_id}/confirmation
+                                                 ↓
+                                          confirm_chat()
+                                                 ↓
+                                     保存确认 → execute_entry()
+                                                 ↓
+                                  鉴权 → 登记 STARTED 并提交
+                                                 ↓
+                                 创建案件、轮次 → 加载 Runtime
+                                                 ↓
+                                    InvestigationRunner.ainvoke()
+                                                 ↓
+                                     取得运行权、读取检查点
+                                                 ↓
+                                          唯一调查图
+                                                 ↓
+           prepare_plan → task_execution → observation → replanning
+                                                 ↓
+                                保存入口结果 → 返回 HTTP 响应
+```
+
+这里有**两个不同的模型决策**：
+
+- 聊天入口：判断回答、追问、查询案件还是提出启动调查。
+- 调查内部：针对正式计划中的任务，生成具体知识检索参数。
+
+它们解决不同的问题，不是连续做两次相同的意图分类。
+
+**2．应用启动：把实际依赖连接起来**
+
+入口：[bootstrap.py (line 107)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/bootstrap.py:107)
+
+`local_services()` 创建：
+
+| 依赖                    | 用在哪里                                   |
+| ----------------------- | ------------------------------------------ |
+| DeepSeek 客户端         | 聊天决策、计划生成、检索请求生成、知识解释 |
+| PostgreSQL 会话工厂     | 聊天、动作记录、案件和执行账本             |
+| PostgreSQL Checkpointer | 保存图的状态和节点进度                     |
+| InvestigationRunner     | 调用唯一调查图，管理运行权和恢复           |
+| BAAI/bge-m3 客户端      | 把检索文字转成向量                         |
+| Milvus 客户端           | 按向量寻找知识片段                         |
+
+其中 `tools_for()` 给本次调查绑定知识工具、允许的模型范围、`top_k` 上限和实际客户端。**这些客户端不进入业务 State。**
+
+当前认证是本地单用户模式，不是完整的企业多用户认证系统。
+
+**3．HTTP 入口：先知道是谁，再处理业务**
+
+入口：[api/routes/entrypoints.py (line 16)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/api/routes/entrypoints.py:16)
+
+你选中的代码：
+
+```
+actor = authenticate(request)
+if inspect.isawaitable(actor):
+    actor = await actor
+```
+
+意思是：
+
+```
+请求里的认证凭据
+    ↓
+部署时注入的 authenticate()
+    ↓
+得到当前用户身份 actor
+```
+
+它允许认证函数是同步或异步函数。当前本地认证会核对 Bearer Token，成功后返回配置中的固定用户身份。
+
+`actor` 随后传给业务服务，用于检查：
+
+- 能否访问这段会话；
+- 能否读取指定案件；
+- 能否创建、继续指定模型的调查。
+
+**认证成功不代表所有业务操作都被允许。**
+
+聊天路由本身很薄：
+
+```
+async def chat(..., actor=Depends(principal)):
+    return entry_response(
+        await invoke(
+            request.app.state.entry_services.chat(body, actor=actor)
+        )
+    )
+```
+
+它只负责接收请求、调用服务、转换 HTTP 响应。
+
+**4．聊天准备：消息先保存，再调用模型**
+
+入口：[EntryServices.prepare_entry() (line 135)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/entrypoints.py:135)
+
+按顺序做：
+
+```
+事务一：actions.begin()
+    保存本次用户请求
+    根据 actor + request_id 识别重复请求
+    提交
+        ↓
+读取近期聊天 history 和历史记忆 memories
+        ↓
+assemble_context() 选择预算内的记忆
+        ↓
+ChatAgent.decide()
+        ↓
+事务二：actions.save_decision()
+    保存模型决定
+    提交
+```
+
+模型调用位置：[conversations/agent.py (line 26)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/conversations/agent.py:26)
+
+模型收到：
+
+```
+当前消息
++ 近期对话
++ 选中的历史记忆
++ 调用方明确提供的目标
++ 可用入口工具说明
+```
+
+然后返回普通回答，或者原生工具调用建议。
+
+结果保存位置：[action_repository.save_decision() (line 84)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/conversations/action_repository.py:84)
+
+| 模型结果       | 保存后的状态           | 下一步                         |
+| -------------- | ---------------------- | ------------------------------ |
+| 普通回答／追问 | `ANSWERED`             | 保存回答；有记忆候选时一并保存 |
+| 查询进度       | `READY`                | 直接进入受控执行               |
+| 启动调查       | `PENDING_CONFIRMATION` | 等用户确认                     |
+| 目标校验失败   | `REJECTED`             | 返回拒绝说明                   |
+
+**模型调用期间没有持续占用数据库事务或行锁。**
+
+**5．确认与执行：确认的是已经保存的那次建议**
+
+入口：[EntryServices.confirm_chat() (line 128)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/entrypoints.py:128)
+
+```
+confirm_chat()
+    ↓
+confirm_entry()
+    核对 turn、invocation_id、decision_digest
+    保存用户确认事实
+    状态改为 READY
+    提交
+    ↓
+execute_entry()
+```
+
+确认不会重新让模型选择工具。它确认的是数据库中已经保存的工具名称和参数。
+
+执行入口：[EntryServices.execute_entry() (line 207)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/entrypoints.py:207)
+
+```
+短事务：
+  核对会话归属
+  锁定动作记录
+  检查 READY 和用户确认
+  检查案件操作权限
+  actions.start() → STARTED
+  提交
+      ↓
+事务外：
+  查询进度，或创建并运行调查
+      ↓
+短事务：
+  actions.finish()
+  保存动作结果和聊天响应
+  提交
+```
+
+`STARTED` 登记用于阻止两个并发请求同时领取同一次动作。它不是长期持有的数据库行锁：**事务提交后行锁释放，持久化状态继续阻止重复领取。**
+
+如果执行中进程退出，入口可能停在 `STARTED`。当前不会自动盲目重跑，需要按原 `turn_id` 查询、核实关联案件。
+
+**6．创建案件，再进入原 Runner**
+
+相关位置：[案件创建与运行入口 (line 52)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/entrypoints.py:52)
+
+```
+_create_case()
+    保存 InvestigationRecord
+    保存第一轮 RoundRecord
+        ↓
+_runtime()
+    从数据库加载案件和轮次
+    检查当前权限
+    绑定本次允许使用的知识工具
+        ↓
+_run_case()
+    runner.ainvoke(
+        context=InvestigationInvocation(runtime=runtime)
+    )
+```
+
+这里保存的是调查身份和输入，**还没有生成正式计划**。
+
+Runner：[workflow/runner.py (line 44)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/runner.py:44)
+
+它负责：
+
+1. 重新鉴权。
+2. 确定稳定的 `run_id`、`plan_id`。
+3. `_claim()` 取得该运行的执行权。
+4. 读取并校验检查点。
+5. 首次执行时初始化 State；恢复时使用已保存进度。
+6. 调用同一张调查图。
+7. 校验最终状态与账本。
+
+入口动作登记和 Runner 运行锁保护的范围不同：
+
+| 机制           | 保护什么                       |
+| -------------- | ------------------------------ |
+| 入口 `STARTED` | 同一次聊天工具建议不能重复领取 |
+| Runner 运行锁  | 同一个调查运行不能被并发推进   |
+| 数据库事务     | 一组数据库写入一起提交或回滚   |
+| 检查点和账本   | 保存流程进度与可靠执行事实     |
+
+**7．调查图：计划 → 执行 → 解释**
+
+拓扑：[workflow/graph.py (line 28)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/graph.py:28)
+
+```
+START
+  ↓
+prepare_plan
+  ↓
+task_execution
+  ↓
+observation
+  ↓
+replanning
+  ↓
+END
+```
+
+**规划节点**
+
+[planning.prepare_plan() (line 49)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/planning.py:49)
+
+```
+加载规划所需记忆
+    ↓
+DeepSeek 生成候选计划
+    ↓
+确定性校验并保存候选
+    ↓
+正式接受计划，建立正式运行记录
+    ↓
+把正式计划加载到 State
+```
+
+已有正式计划时加载原计划，不能重新生成一份替换历史。
+
+**任务执行节点**
+
+[nodes.task_execution() (line 104)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/nodes.py:104)
+
+对正式计划中的每个任务：
+
+```
+QUERY_FORMULATION 阶段
+    模型生成工具名称和参数
+    校验原生 tool_calls、请求模型、权限和工具绑定
+    保存请求生成结果
+        ↓
+知识执行阶段
+    execute_registered_tool()
+    执行选中的受控工具
+    保存 TaskExecutionResult
+```
+
+两个阶段通过 [ledger_phase_executor() (line 159)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/phase_execution.py:159) 登记操作、尝试、结果及恢复选择。
+
+**8．知识工具内部：文字如何变成检索结果**
+
+分派入口：[execution/tools.py (line 166)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/execution/tools.py:166)
+
+检索适配器：[execution/knowledge.py (line 46)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/execution/knowledge.py:46)
+
+底层检索：[knowledge/retrieval.py (line 124)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/knowledge/retrieval.py:124)
+
+```
+模型提出 knowledge_search(query, top_k, filters)
+    ↓
+注册中心校验工具名、能力、参数
+    ↓
+结合可信工具绑定限制检索范围与 top_k
+    ↓
+BAAI/bge-m3：query → 1024 维向量
+    ↓
+Milvus：在当前服务索引中搜索相近片段
+    ↓
+PostgreSQL：回查并核验权威知识记录、来源和过滤范围
+    ↓
+带来源的知识结果
+    ↓
+TaskExecutionResult 入账
+```
+
+这次实际使用的是合成知识资料。验证的是检索链路可运行，不代表已经拥有充分的真实业务知识。
+
+知识入库是另一条准备链路，不会每聊一句就重新建索引：
+
+```
+知识文档 → 分块 → PostgreSQL 保存来源与正文
+                    ↓
+               bge-m3 向量化
+                    ↓
+               Milvus 建索引
+                    ↓
+               校验并激活索引
+```
+
+**9．解释结果、形成记忆、返回聊天响应**
+
+解释入口：[nodes.observation() (line 168)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/nodes.py:168)
+
+```
+校验本轮计划和执行结果
+    ↓
+有可用知识 → DeepSeek 解释
+无可用知识 → 明确 INCONCLUSIVE
+    ↓
+校验模型引用是否对应实际执行结果
+    ↓
+保存 Observation
+    ↓
+同事务提取并保存案件记忆
+```
+
+记忆保存：[memory.repository.capture_observation() (line 35)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/memory/repository.py:35)
+
+后续规划、检索请求生成可以再次读取案件记忆。聊天历史与聊天记忆仍按会话归属读取。
+
+图结束后，`execute_entry()` 调用 `_progress()` 读取案件账本，保存最终聊天响应，再返回客户端。**当前启动调查后的答复由进度读取逻辑组织，没有额外增加一次聊天模型总结。**
+
+最后需要明确当前终点：[replanning() (line 217)](/C:/Users/Vinim/Desktop/RiskMind/backend/src/risk_platform/workflow/nodes.py:217) 仍是首轮结束骨架，设置 `round_complete=True`、案件保持 `OPEN`；尚未实现真正的多轮自主重规划。本次验证通过的是**聊天启动调查到首轮知识检索、解释和持久化**。

@@ -25,7 +25,9 @@ def entry_tool_declarations(names=ENTRY_TOOL_NAMES):
     if len(set(names)) != len(names) or any(name not in _ENTRY_TOOLS for name in names):
         raise ValueError("入口工具未注册或重复")
     return [{"type": "function", "function": {
-        "name": name, "description": _ENTRY_TOOLS[name][1], "strict": True,
+        # DeepSeek server-side strict requires /beta; standard endpoint relies on
+        # the full local parser/target gate below, as investigation tools already do.
+        "name": name, "description": _ENTRY_TOOLS[name][1], "strict": False,
         "parameters": _ENTRY_TOOLS[name][0].model_json_schema(),
     }} for name in names]
 

@@ -37,6 +37,10 @@ class InvestigationRunner:
         self._graph = build_investigation_graph(agent, session_factory=session_factory,
             checkpointer=checkpointer)
 
+    async def aclose(self):
+        """Release the dedicated lock engine; caller must first finish active runs."""
+        await self._lock_engine.dispose()
+
     async def ainvoke(self, *, context: InvestigationInvocation, plan_id=None, policy: RecoveryPolicy | None = None):
         # 对外统一包装，内部 claim 必须由本次调用鉴权和加锁后生成。
         context = require_invocation(context).runtime

@@ -186,10 +186,19 @@ async def execute_registered_tool(name: str, task, request, *, runtime_context) 
     return await TOOL_DEFINITIONS[name].handler(task, request, runtime_context=runtime_context)
 
 
+def required_tool_options() -> dict:
+    """DeepSeek thinking mode rejects required tool selection; keep it mandatory.
+
+    Shared by the actual request and its persisted protocol digest.
+    """
+    return {"tool_choice": "required", "parallel_tool_calls": False,
+            "extra_body": {"thinking": {"type": "disabled"}}}
+
+
 def query_contract_digest(prompt: str) -> str:
     """工具声明和调用协议也是模型输入的一部分，必须参与恢复规格摘要。"""
-    payload = {"protocol": "bound-tool-function-call/v2", "system_prompt": prompt,
+    payload = {"protocol": "bound-tool-function-call/v3", "system_prompt": prompt,
                "tools": tool_declarations(CapabilityType.KNOWLEDGE_RETRIEVAL),
-               "tool_choice": "required", "parallel_tool_calls": False}
+               **required_tool_options()}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()

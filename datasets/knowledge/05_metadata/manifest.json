@@ -1,0 +1,955 @@
+{
+  "corpus_id": "riskmind-synthetic-enterprise-cases-v1",
+  "created": "2026-11-13",
+  "document_count": 50,
+  "reference_sources": {
+    "SR26": {
+      "title": "美国联邦储备系统《Revised Guidance on Model Risk Management》（2026）——持续监测、效果验证和模型限制",
+      "url": "https://www.federalreserve.gov/supervisionreg/srletters/sr2602.htm"
+    },
+    "BCBS239": {
+      "title": "巴塞尔银行监管委员会 BCBS 239 ——风险数据准确性、完整性、时效性及数据血缘",
+      "url": "https://www.bis.org/committees/bcbs/basel-framework/standard/srp/36/inforce/2019-12-15/published/2019-12-15"
+    },
+    "EBA": {
+      "title": "欧洲银行管理局《Guidelines on Loan Origination and Monitoring》——输入质量、输出监控、可追溯性",
+      "url": "https://www.eba.europa.eu/activities/single-rulebook/regulatory-activities/credit-risk/guidelines-loan-origination-and-monitoring"
+    },
+    "EQUIFAX": {
+      "title": "美国 CFPB 2025 年 Equifax 执法材料——生产评分服务代码变更引发错误日期属性及错误评分的公开失效类型",
+      "url": "https://www.consumerfinance.gov/enforcement/actions/equifax-inc-and-equifax-information-services-llc/"
+    }
+  },
+  "documents": [
+    {
+      "document_id": "DEV-CREDIT_V3-V3_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.0",
+      "title": "credit_v3 v3.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CREDIT_V3-V3_0_credit_v3_v3_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CREDIT_V3-V3_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3631,
+      "features": [
+        "apply_cnt_30d",
+        "credit_query_cnt_6m",
+        "debt_ratio",
+        "credit_history_months"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CREDIT_V3-V3_1",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.1",
+      "title": "credit_v3 v3.1 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CREDIT_V3-V3_1_credit_v3_v3_1.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CREDIT_V3-V3_1/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3652,
+      "features": [
+        "apply_cnt_30d",
+        "credit_query_cnt_6m",
+        "debt_ratio",
+        "credit_history_months"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CREDIT_V3-V3_2",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "credit_v3 v3.2 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CREDIT_V3-V3_2_credit_v3_v3_2.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CREDIT_V3-V3_2/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3657,
+      "features": [
+        "apply_cnt_30d",
+        "credit_query_cnt_6m",
+        "debt_ratio",
+        "credit_history_months"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-SMALLBIZ_PD-V2_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.0",
+      "title": "smallbiz_pd v2.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-SMALLBIZ_PD-V2_0_smallbiz_pd_v2_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-SMALLBIZ_PD-V2_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3593,
+      "features": [
+        "cashflow_volatility_90d",
+        "invoice_ratio_180d",
+        "business_age_months",
+        "guarantee_type"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-SMALLBIZ_PD-V2_1",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "smallbiz_pd v2.1 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-SMALLBIZ_PD-V2_1_smallbiz_pd_v2_1.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-SMALLBIZ_PD-V2_1/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3608,
+      "features": [
+        "cashflow_volatility_90d",
+        "invoice_ratio_180d",
+        "business_age_months",
+        "guarantee_type"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CASHLOAN_SCORE-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.0",
+      "title": "cashloan_score v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CASHLOAN_SCORE-V1_0_cashloan_score_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CASHLOAN_SCORE-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3608,
+      "features": [
+        "device_change_cnt_30d",
+        "apply_cnt_7d",
+        "income_band",
+        "merchant_affinity"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CASHLOAN_SCORE-V1_1",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "cashloan_score v1.1 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CASHLOAN_SCORE-V1_1_cashloan_score_v1_1.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CASHLOAN_SCORE-V1_1/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3619,
+      "features": [
+        "device_change_cnt_30d",
+        "apply_cnt_7d",
+        "income_band",
+        "merchant_affinity"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-REVOLVING_LIMIT-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.0",
+      "title": "revolving_limit v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-REVOLVING_LIMIT-V1_0_revolving_limit_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-REVOLVING_LIMIT-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3663,
+      "features": [
+        "utilization_30d",
+        "repay_ratio_90d",
+        "overdue_count_12m",
+        "balance_trend"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-REVOLVING_LIMIT-V1_1",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.1",
+      "title": "revolving_limit v1.1 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-REVOLVING_LIMIT-V1_1_revolving_limit_v1_1.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-REVOLVING_LIMIT-V1_1/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3656,
+      "features": [
+        "utilization_30d",
+        "repay_ratio_90d",
+        "overdue_count_12m",
+        "balance_trend"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CARD_BEHAVIOR-V2_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.0",
+      "title": "card_behavior v2.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CARD_BEHAVIOR-V2_0_card_behavior_v2_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CARD_BEHAVIOR-V2_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3609,
+      "features": [
+        "payment_ratio_3m",
+        "cash_advance_30d",
+        "limit_utilization",
+        "days_since_last_payment"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-CARD_BEHAVIOR-V2_1",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.1",
+      "title": "card_behavior v2.1 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-CARD_BEHAVIOR-V2_1_card_behavior_v2_1.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-CARD_BEHAVIOR-V2_1/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3606,
+      "features": [
+        "payment_ratio_3m",
+        "cash_advance_30d",
+        "limit_utilization",
+        "days_since_last_payment"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-MORTGAGE_PD-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "mortgage_pd",
+      "model_version": "v1.0",
+      "title": "mortgage_pd v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-MORTGAGE_PD-V1_0_mortgage_pd_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-MORTGAGE_PD-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3599,
+      "features": [
+        "ltv_current",
+        "income_stability",
+        "rate_reset_gap",
+        "payment_to_income"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-AUTOFINANCE_PD-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "autofinance_pd",
+      "model_version": "v1.0",
+      "title": "autofinance_pd v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-AUTOFINANCE_PD-V1_0_autofinance_pd_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-AUTOFINANCE_PD-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3622,
+      "features": [
+        "down_payment_ratio",
+        "vehicle_age",
+        "dealer_quality_index",
+        "credit_query_cnt_6m"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-COLLECTION_RISK-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "collection_risk",
+      "model_version": "v1.0",
+      "title": "collection_risk v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-COLLECTION_RISK-V1_0_collection_risk_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-COLLECTION_RISK-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3642,
+      "features": [
+        "dpd_bucket",
+        "contact_success_14d",
+        "promise_to_pay",
+        "remaining_balance"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "DEV-MERCHANT_RISK-V1_0",
+      "document_version": "1.0",
+      "document_type": "MODEL_DEVELOPMENT_REPORT",
+      "model_id": "merchant_risk",
+      "model_version": "v1.0",
+      "title": "merchant_risk v1.0 模型开发与监测基线报告（合成）",
+      "path": "MODEL_DEVELOPMENT_REPORT/DEV-MERCHANT_RISK-V1_0_merchant_risk_v1_0.md",
+      "source_uri": "https://riskmind.example.test/synthetic/DEV-MERCHANT_RISK-V1_0/1.0",
+      "category": "MODEL_DEVELOPMENT",
+      "outcome": "BASELINE",
+      "chars": 3580,
+      "features": [
+        "refund_ratio_90d",
+        "merchant_age",
+        "industry_code",
+        "settlement_volatility"
+      ],
+      "reference_docs": []
+    },
+    {
+      "document_id": "CASE-SIM-2026-001",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-001 credit_v3 模拟标签成熟样本误计为好样本（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-001_credit_v3_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-001/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "CONFIRMED",
+      "chars": 4989,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-002",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-002 cashloan_score 标签回补批次滞后导致监控波动（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-002_cashloan_score_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-002/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "CONFIRMED",
+      "chars": 4833,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_1"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-003",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-003 smallbiz_pd 标签观察窗口由90天误配为60天（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-003_smallbiz_pd_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-003/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "CONFIRMED",
+      "chars": 4822,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-004",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-004 revolving_limit 标签DPD阈值枚举错映射（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-004_revolving_limit_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-004/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "CONFIRMED",
+      "chars": 4837,
+      "features": [],
+      "reference_docs": [
+        "DEV-REVOLVING_LIMIT-V1_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-005",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-005 card_behavior 跨期客户去重误删成熟违约账户（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-005_card_behavior_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-005/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "CONFIRMED",
+      "chars": 4785,
+      "features": [],
+      "reference_docs": [
+        "DEV-CARD_BEHAVIOR-V2_1"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-006",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "mortgage_pd",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-006 mortgage_pd 标签成熟不足且无法形成可靠复算（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-006_mortgage_pd_LABEL_MATURITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-006/1.0",
+      "category": "LABEL_MATURITY",
+      "outcome": "INCONCLUSIVE",
+      "chars": 4842,
+      "features": [],
+      "reference_docs": [
+        "DEV-MORTGAGE_PD-V1_0"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-007",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-007 credit_v3 申请次数特征事件时间回补失效（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-007_credit_v3_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-007/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 4847,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-008",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.0",
+      "title": "CASE-SIM-2026-008 smallbiz_pd 账务重复入湖造成现金流特征偏移（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-008_smallbiz_pd_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-008/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 5003,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_0"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-009",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-009 revolving_limit 跨时区日期切分造成月末额度异常（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-009_revolving_limit_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-009/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 4834,
+      "features": [],
+      "reference_docs": [
+        "DEV-REVOLVING_LIMIT-V1_1"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-010",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-010 cashloan_score 收入缺失默认值误配置为高收入（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-010_cashloan_score_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-010/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 4959,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_0"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-011",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "merchant_risk",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-011 merchant_risk 冲正金额未扣除导致商户结算波动虚高（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-011_merchant_risk_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-011/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 4785,
+      "features": [],
+      "reference_docs": [
+        "DEV-MERCHANT_RISK-V1_0"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-012",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "autofinance_pd",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-012 autofinance_pd 经销商批次上报迟延造成特征空洞（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-012_autofinance_pd_DATA_QUALITY.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-012/1.0",
+      "category": "DATA_QUALITY",
+      "outcome": "CONFIRMED",
+      "chars": 4783,
+      "features": [],
+      "reference_docs": [
+        "DEV-AUTOFINANCE_PD-V1_0"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-013",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-013 credit_v3 新合作渠道引起整体KS表观下降（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-013_credit_v3_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-013/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4805,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-014",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-014 cashloan_score 促销活动吸引新客导致现金贷评分分布变化（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-014_cashloan_score_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-014/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4882,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_1"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-015",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-015 smallbiz_pd 小微行业结构突变导致总指标扰动（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-015_smallbiz_pd_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-015/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4785,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-016",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-016 card_behavior 信用卡联合品牌客户占比变化（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-016_card_behavior_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-016/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4782,
+      "features": [],
+      "reference_docs": [
+        "DEV-CARD_BEHAVIOR-V2_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-017",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "mortgage_pd",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-017 mortgage_pd 地区结构迁移掩盖按揭分群差异（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-017_mortgage_pd_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-017/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4839,
+      "features": [],
+      "reference_docs": [
+        "DEV-MORTGAGE_PD-V1_0"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-018",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "merchant_risk",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-018 merchant_risk 商户行业映射更新导致构成偏移（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-018_merchant_risk_CHANNEL_MIX.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-018/1.0",
+      "category": "CHANNEL_MIX",
+      "outcome": "CONFIRMED",
+      "chars": 4806,
+      "features": [],
+      "reference_docs": [
+        "DEV-MERCHANT_RISK-V1_0"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-019",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.1",
+      "title": "CASE-SIM-2026-019 credit_v3 评分PSI分箱基线版本错用（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-019_credit_v3_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-019/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "CONFIRMED",
+      "chars": 4796,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-020",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-020 cashloan_score 新设备指纹行为导致现金贷真实分布漂移（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-020_cashloan_score_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-020/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "PARTIALLY_CONFIRMED",
+      "chars": 4845,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-021",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-021 credit_v3 申请次数受短期产品推广影响（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-021_credit_v3_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-021/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "CONFIRMED",
+      "chars": 4894,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-022",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-022 smallbiz_pd 类别取值扩张引发特征PSI告警（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-022_smallbiz_pd_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-022/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "PARTIALLY_CONFIRMED",
+      "chars": 4840,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_1"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-023",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.0",
+      "title": "CASE-SIM-2026-023 card_behavior 节假日错选参考窗口引起评分漂移假警（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-023_card_behavior_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-023/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "CONFIRMED",
+      "chars": 4815,
+      "features": [],
+      "reference_docs": [
+        "DEV-CARD_BEHAVIOR-V2_0"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-024",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-024 revolving_limit 评分均值变化由还款行为结构性转变推动（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-024_revolving_limit_DISTRIBUTION_DRIFT.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-024/1.0",
+      "category": "DISTRIBUTION_DRIFT",
+      "outcome": "PARTIALLY_CONFIRMED",
+      "chars": 4871,
+      "features": [],
+      "reference_docs": [
+        "DEV-REVOLVING_LIMIT-V1_1"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-025",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-025 credit_v3 线上线下模型包版本不一致（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-025_credit_v3_VERSION_MISMATCH.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-025/1.0",
+      "category": "VERSION_MISMATCH",
+      "outcome": "CONFIRMED",
+      "chars": 4873,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-026",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "card_behavior",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-026 card_behavior 特征在线线下枚举映射顺序不同（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-026_card_behavior_VERSION_MISMATCH.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-026/1.0",
+      "category": "VERSION_MISMATCH",
+      "outcome": "CONFIRMED",
+      "chars": 4847,
+      "features": [],
+      "reference_docs": [
+        "DEV-CARD_BEHAVIOR-V2_1"
+      ],
+      "reference_source": "EQUIFAX"
+    },
+    {
+      "document_id": "CASE-SIM-2026-027",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-027 cashloan_score 时间特征以固定日期替代请求日期（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-027_cashloan_score_VERSION_MISMATCH.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-027/1.0",
+      "category": "VERSION_MISMATCH",
+      "outcome": "CONFIRMED",
+      "chars": 4988,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_1"
+      ],
+      "reference_source": "EQUIFAX"
+    },
+    {
+      "document_id": "CASE-SIM-2026-028",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-028 smallbiz_pd 模型制品校验通过但特征配置缓存过旧（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-028_smallbiz_pd_VERSION_MISMATCH.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-028/1.0",
+      "category": "VERSION_MISMATCH",
+      "outcome": "CONFIRMED",
+      "chars": 4795,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_1"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-029",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "merchant_risk",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-029 merchant_risk 超时降级误将旧模型流量纳入新版指标（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-029_merchant_risk_VERSION_MISMATCH.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-029/1.0",
+      "category": "VERSION_MISMATCH",
+      "outcome": "CONFIRMED",
+      "chars": 4808,
+      "features": [],
+      "reference_docs": [
+        "DEV-MERCHANT_RISK-V1_0"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-030",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "credit_v3",
+      "model_version": "v3.2",
+      "title": "CASE-SIM-2026-030 credit_v3 成熟样本KS持续下降且分群一致（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-030_credit_v3_TRUE_DETERIORATION.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-030/1.0",
+      "category": "TRUE_DETERIORATION",
+      "outcome": "CONFIRMED",
+      "chars": 4839,
+      "features": [],
+      "reference_docs": [
+        "DEV-CREDIT_V3-V3_2"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-031",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "cashloan_score",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-031 cashloan_score 现金贷高风险客群排序能力实质下降（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-031_cashloan_score_TRUE_DETERIORATION.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-031/1.0",
+      "category": "TRUE_DETERIORATION",
+      "outcome": "CONFIRMED",
+      "chars": 4819,
+      "features": [],
+      "reference_docs": [
+        "DEV-CASHLOAN_SCORE-V1_1"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-032",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "autofinance_pd",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-032 autofinance_pd 汽车贷款经销商风险迁移造成群体性能下降（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-032_autofinance_pd_TRUE_DETERIORATION.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-032/1.0",
+      "category": "TRUE_DETERIORATION",
+      "outcome": "CONFIRMED",
+      "chars": 4897,
+      "features": [],
+      "reference_docs": [
+        "DEV-AUTOFINANCE_PD-V1_0"
+      ],
+      "reference_source": "EBA"
+    },
+    {
+      "document_id": "CASE-SIM-2026-033",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "merchant_risk",
+      "model_version": "v1.0",
+      "title": "CASE-SIM-2026-033 merchant_risk 商户贷款行业冲击引起真实违约排序下降（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-033_merchant_risk_TRUE_DETERIORATION.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-033/1.0",
+      "category": "TRUE_DETERIORATION",
+      "outcome": "CONFIRMED",
+      "chars": 4812,
+      "features": [],
+      "reference_docs": [
+        "DEV-MERCHANT_RISK-V1_0"
+      ],
+      "reference_source": "SR26"
+    },
+    {
+      "document_id": "CASE-SIM-2026-034",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "smallbiz_pd",
+      "model_version": "v2.1",
+      "title": "CASE-SIM-2026-034 smallbiz_pd 外部征信报送冲突导致根因无法判定（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-034_smallbiz_pd_INCONCLUSIVE.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-034/1.0",
+      "category": "INCONCLUSIVE",
+      "outcome": "INCONCLUSIVE",
+      "chars": 4944,
+      "features": [],
+      "reference_docs": [
+        "DEV-SMALLBIZ_PD-V2_1"
+      ],
+      "reference_source": "BCBS239"
+    },
+    {
+      "document_id": "CASE-SIM-2026-035",
+      "document_version": "1.0",
+      "document_type": "INCIDENT_REPORT",
+      "model_id": "revolving_limit",
+      "model_version": "v1.1",
+      "title": "CASE-SIM-2026-035 revolving_limit 客群漂移与标签滞后同时出现尚难拆分（合成）",
+      "path": "INCIDENT_REPORT/CASE-SIM-2026-035_revolving_limit_INCONCLUSIVE.md",
+      "source_uri": "https://riskmind.example.test/synthetic/CASE-SIM-2026-035/1.0",
+      "category": "INCONCLUSIVE",
+      "outcome": "INCONCLUSIVE",
+      "chars": 4905,
+      "features": [],
+      "reference_docs": [
+        "DEV-REVOLVING_LIMIT-V1_1"
+      ],
+      "reference_source": "SR26"
+    }
+  ]
+}

@@ -38,6 +38,36 @@ class InvestigationAgent:
         self.client = client
         self.model = model
 
+    def replan(self, value, *, input_limit: int, context_window: int,
+               output_tokens: int, safety_tokens: int):
+        """生成补查建议；不执行、不接受下一轮、不修改本轮材料。
+
+        预算由组合入口显式传入，不猜测模型窗口。必要材料超限直接失败，
+        不截断 Observation；模型/网络失败交给后续持久化阶段处理。
+        """
+        from risk_platform.core.token_budget import check_request_budget
+        from risk_platform.workflow.replanning import (
+            ReplanningInput, StopInvestigation, REPLANNING_DECISION, REPLANNING_PROMPT,
+        )
+
+        value = ReplanningInput.model_validate_json(value.model_dump_json())
+        if value.remaining_rounds == 0:
+            return StopInvestigation(action="STOP", reason="调查轮次预算已耗尽；不代表根因已确认")
+        messages = [
+            {"role": "system", "content": REPLANNING_PROMPT},
+            {"role": "user", "content": value.model_dump_json()},
+        ]
+        check_request_budget(messages, input_limit=input_limit, context_window=context_window,
+                             output_tokens=output_tokens, safety_tokens=safety_tokens)
+        response = self.client.chat.completions.create(
+            model=self.model, messages=messages, max_tokens=output_tokens,
+            response_format={"type": "json_object"},
+        )
+        choice = response.choices[0]
+        if choice.finish_reason != "stop" or not choice.message.content:
+            raise ValueError("Replanning 未完整返回，不能接受部分决定")
+        return REPLANNING_DECISION.validate_json(choice.message.content)
+
     def observe_knowledge_round(self, plan, results):
         """只解释本轮真实结果；系统会再次校验所有引用，不赋予当前根因结论资格。"""
         from risk_platform.workflow.observation import KnowledgeObservationDraft, build_observation_input
@@ -55,7 +85,7 @@ class InvestigationAgent:
 
     def formulate_tool_call(self, task, planning_input, *, goal, tools, tool_limits, memory_context=None):
         """只看到本任务已绑定工具的公开声明与参数限制，不接受可信运行对象。"""
-        from risk_platform.execution.tools import parse_tool_choice
+        from risk_platform.execution.tools import parse_tool_choice, required_tool_options
         names = tuple(tool["function"]["name"] for tool in tools)
         if not names or len(names) != len(set(names)):
             raise ValueError("必须明确提供当前任务可用的工具")
@@ -71,7 +101,7 @@ class InvestigationAgent:
             model=self.model,
             messages=[{"role": "system", "content": KNOWLEDGE_QUERY_SYSTEM_PROMPT},
                       {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            tools=tools, tool_choice="required", parallel_tool_calls=False,
+            tools=tools, **required_tool_options(),
         )
         return parse_tool_choice(response.choices[0], task.capability, allowed_names=names)
 

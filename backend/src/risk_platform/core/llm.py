@@ -1,28 +1,45 @@
-"""Construction and configuration of the Zhipu OpenAI-compatible client."""
+"""DeepSeek official OpenAI-compatible client and the two existing Agent bindings.
 
+Read process environment only; no registry access, dotenv loading or implicit
+fallback to another provider. The composition caller owns the shared client.
+"""
 import os
-
 from openai import OpenAI
 
-
-DEFAULT_ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
-DEFAULT_ZHIPU_MODEL = "glm-4.7-flash"
+DEFAULT_BASE_URL = "https://api.deepseek.com"
 
 
-def create_zhipu_client() -> OpenAI:
-    """Create a Zhipu client from the process environment."""
+def _required(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is not set")
+    return value
 
-    api_key = os.environ.get("ZHIPU_API_KEY")
-    if not api_key:
-        raise RuntimeError("ZHIPU_API_KEY is not set")
 
+def create_llm_client() -> OpenAI:
+    """No SDK retries: business retries belong to explicit execution policy."""
     return OpenAI(
-        api_key=api_key,
-        base_url=os.environ.get("ZHIPU_BASE_URL", DEFAULT_ZHIPU_BASE_URL),
+        api_key=_required("DEEPSEEK_API_KEY"),
+        base_url=os.environ.get("DEEPSEEK_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+        timeout=120.0,
+        max_retries=0,
     )
 
 
-def get_zhipu_model() -> str:
-    """Return the configured Zhipu model name."""
+def get_llm_model() -> str:
+    """Require the full provider model ID; never silently change the model."""
+    return _required("DEEPSEEK_MODEL")
 
-    return os.environ.get("ZHIPU_MODEL", DEFAULT_ZHIPU_MODEL)
+
+def create_llm_agents():
+    """Bind ChatAgent and InvestigationAgent to one configured client/model.
+
+    Returns (chat_agent, investigation_agent). The caller closes the shared
+    client once, after all work finishes. This does not configure auth or Runner.
+    """
+    from risk_platform.conversations.agent import ChatAgent
+    from risk_platform.agents.investigation import InvestigationAgent
+
+    model = get_llm_model()
+    client = create_llm_client()
+    return ChatAgent(client, model), InvestigationAgent(client, model)

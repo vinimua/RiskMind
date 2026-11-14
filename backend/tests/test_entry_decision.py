@@ -58,10 +58,10 @@ def test_one_native_call_returns_typed_proposal(name,arguments,expected):
     assert ToolInvocation.model_validate_json(result.model_dump_json())==result
 
 
-def test_declarations_are_strict_and_have_no_trusted_fields():
+def test_standard_endpoint_declarations_keep_local_schema_and_no_trusted_fields():
     for declaration in entry_tool_declarations():
         tool=declaration["function"];schema=tool["parameters"]
-        assert tool["strict"] is True and schema["additionalProperties"] is False
+        assert tool["strict"] is False and schema["additionalProperties"] is False
         assert set(schema["required"])==set(schema["properties"])
         assert len(schema["properties"])==1
         assert not {"actor_id","confirmed","investigation_status"}.intersection(schema["properties"])
