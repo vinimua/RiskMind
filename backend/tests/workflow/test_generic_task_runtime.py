@@ -30,6 +30,10 @@ class TestBinding:
         assert actor_id == "actor"
 
 
+class Reference(BaseModel):
+    reference_id: str
+
+
 class ReadArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     key: str
@@ -49,8 +53,10 @@ def install_test_tools(monkeypatch, calls):
                 error=ExecutionError(category="DEPENDENCY", code="TEST_ONLY", message="测试工具的失败事实", retryable=False))
         definitions[name] = tools.ToolDefinition(name=name, capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
             description="仅测试用的另一种读取工具", request_model=ReadArgs, handler=handler,
-            model_input=lambda _: {"allowed_key": "record"}, validate_request=lambda *_: None,
-            execution_phase=OperationType.KNOWLEDGE_EXECUTION)
+            execution_limits=lambda _: {"allowed_key": "record"}, validate_request=lambda *_: None,
+                    result_model=ReadArgs, to_observation_items=lambda _: [], reference_model=Reference,
+            validate_reference=lambda *_: None, authorize_result=lambda *_: True,
+            validate_result=lambda *_: None)
     # 不匹配当前任务的能力，即使绑定也不能提供给模型。
     definitions["test_compute"] = replace(definitions["test_read_a"], name="test_compute", capability=CapabilityType.COMPUTATION)
     monkeypatch.setattr(tools, "TOOL_DEFINITIONS", MappingProxyType(definitions))
@@ -74,7 +80,7 @@ def test_generic_loop_uses_selected_tool_without_knowledge_binding(monkeypatch):
     result = asyncio.run(nodes.task_execution(source, investigation_agent=Agent(), runtime_context=runtime, execute_phase=phase))
     assert calls == [("test_read_b", "record", "actor")]
     assert result["task_execution_results"][0].error.code == "TEST_ONLY"
-    assert phases[-1] == (OperationType.KNOWLEDGE_EXECUTION, "test_read_b")
+    assert phases[-1] == (OperationType.TOOL_EXECUTION, "test_read_b")
 
 
 def test_model_cannot_select_registered_but_unbound_tool(monkeypatch):
@@ -109,9 +115,9 @@ def test_observation_needs_generic_identity_not_knowledge_binding(monkeypatch):
     source = current(results)
     runtime = replace(make_runtime(source["planning_input"]), tools=())
     class Agent:
-        def observe_knowledge_round(self, *_, **__):
-            from risk_platform.workflow.observation import KnowledgeObservationDraft
-            return KnowledgeObservationDraft.model_validate(draft(results))
+        def observe_round(self, *_, **__):
+            from risk_platform.workflow.observation import ObservationDraft
+            return ObservationDraft.model_validate(draft(results))
     output = asyncio.run(nodes.observation(source, investigation_agent=Agent(), runtime_context=runtime, execute_phase=run_phase))
     assert output["observation"].status == "SUCCEEDED"
 
@@ -122,6 +128,36 @@ def test_legacy_ledger_explicitly_rejects_other_tool_before_produce():
     phase = phase_execution.ledger_phase_executor(None, None, runtime=None, agent=None)
     with pytest.raises(LedgerIntegrityError, match="账本版本"):
         asyncio.run(phase(OperationType.KNOWLEDGE_EXECUTION, forbidden, tool_name="test_read_b"))
+
+
+@pytest.mark.parametrize("committed", [True, False])
+def test_tool_result_log_requires_reliable_phase_return(monkeypatch, caplog, committed):
+    from types import SimpleNamespace
+    from test_observation import execution
+    result = execution()
+    value = SimpleNamespace(tool_name="knowledge_search")
+    monkeypatch.setattr(phase_execution, "_operation", lambda *args, **kwargs: value)
+    monkeypatch.setattr(phase_execution, "operation_key", lambda _: "stable-operation")
+
+    async def phase(*args, **kwargs):
+        if not committed:
+            raise RuntimeError("commit failed")
+        return SimpleNamespace(execution=result)
+
+    monkeypatch.setattr(phase_execution, "_phase", phase)
+    execute = phase_execution.ledger_phase_executor(None, None, runtime=None, agent=None)
+    caplog.set_level("INFO", logger=phase_execution.__name__)
+    if committed:
+        assert asyncio.run(execute(OperationType.KNOWLEDGE_EXECUTION, None)) == result
+    else:
+        with pytest.raises(RuntimeError):
+            asyncio.run(execute(OperationType.KNOWLEDGE_EXECUTION, None))
+    events = [r for r in caplog.records if r.message == "tool_result"]
+    assert len(events) == int(committed)
+    if events:
+        assert events[0].execution_status == "SUCCEEDED"
+        assert events[0].tool_name == "knowledge_search"
+        assert not hasattr(events[0], "query") and not hasattr(events[0], "payload")
 
 
 @pytest.mark.parametrize("name", [None, {}, ["knowledge_search"]])

@@ -19,7 +19,7 @@ def test_observation_prompt_and_structured_response():
     content = {"findings": [], "unresolved_questions": [],
                "action": "STOP", "stop_reason": "No further knowledge question"}
     model, calls = agent(json.dumps(content, ensure_ascii=False))
-    result = model.observe_knowledge_round(InvestigationPlan(goal="背景", tasks=[]), [])
+    result = model.observe_round(InvestigationPlan(goal="背景", tasks=[]), [])
     assert result.stop_reason == content["stop_reason"]
     system = calls[0]["messages"][0]["content"]
     assert "历史报告只能解释为历史知识线索" in system and "待分析数据" in system
@@ -33,7 +33,7 @@ def test_observation_prompt_and_structured_response():
 def test_invalid_or_truncated_explanation_not_accepted(content, finish):
     model, _ = agent(content, finish)
     with pytest.raises(ValueError):
-        model.observe_knowledge_round(InvestigationPlan(goal="背景", tasks=[]), [])
+        model.observe_round(InvestigationPlan(goal="背景", tasks=[]), [])
 
 
 @pytest.mark.parametrize("changes", [
@@ -45,10 +45,10 @@ def test_invalid_or_truncated_explanation_not_accepted(content, finish):
     {"narrative": "obsolete"},
 ])
 def test_observation_decision_fields_have_no_redundant_branches(changes):
-    from risk_platform.workflow.observation import KnowledgeObservationDraft
+    from risk_platform.workflow.observation import ObservationDraft
     value = {"findings": [], "unresolved_questions": [], "action": "STOP", "stop_reason": "done"}
     with pytest.raises(ValueError):
-        KnowledgeObservationDraft.model_validate(value | changes)
+        ObservationDraft.model_validate(value | changes)
 
 
 def test_next_planning_keeps_multiple_observation_sources_and_failures():

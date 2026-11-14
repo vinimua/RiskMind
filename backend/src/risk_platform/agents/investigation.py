@@ -4,11 +4,12 @@ import json
 
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field
+from risk_platform.core.observability import observe_generation, record_usage
 
 from risk_platform.agents.prompts import (
     INITIAL_PLANNING_SYSTEM_PROMPT,
     KNOWLEDGE_QUERY_SYSTEM_PROMPT,
-    KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT,
+    OBSERVATION_SYSTEM_PROMPT,
     build_initial_planning_context,
 )
 from risk_platform.workflow.contracts import (
@@ -24,6 +25,7 @@ class _InitialTaskDraft(BaseModel):
 
     objective: str
     expected_result: str
+    capability: CapabilityType = CapabilityType.KNOWLEDGE_RETRIEVAL
 
 
 class _InitialPlanDraft(BaseModel):
@@ -38,21 +40,39 @@ class InvestigationAgent:
         self.client = client
         self.model = model
 
-    def observe_knowledge_round(self, plan, results, *, planning_input=None, previous_observations=(), available_capabilities=()):
+    @observe_generation("knowledge-observation")
+    def observe_round(self, plan, results, *, planning_input=None, previous_observations=(), available_capabilities=()):
         """只解释本轮真实结果；系统会再次校验所有引用，不赋予当前根因结论资格。"""
-        from risk_platform.workflow.observation import KnowledgeObservationDraft, build_observation_input
+        from risk_platform.workflow.observation import ObservationDraft, build_observation_input
+        from risk_platform.core.token_budget import ContextBudgetExceeded
+
+        payload = build_observation_input(plan, results, planning_input=planning_input,
+            previous_observations=previous_observations, available_capabilities=available_capabilities)
+        if any(item["outcome"] in ("KNOWLEDGE_AVAILABLE", "RESULT_AVAILABLE") for item in payload["executions"]) and not any(
+            item.get("items") for item in payload["executions"]
+        ):
+            raise ContextBudgetExceeded("工具正文全部超出预算，未调用解释模型")
 
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=[{"role": "system", "content": KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT},
-                      {"role": "user", "content": json.dumps(build_observation_input(plan, results, planning_input=planning_input,
-                          previous_observations=previous_observations, available_capabilities=available_capabilities), ensure_ascii=False)}],
+            messages=[{"role": "system", "content": OBSERVATION_SYSTEM_PROMPT},
+                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
             response_format={"type": "json_object"},
         )
+        record_usage(response)
         choice = response.choices[0]
         if choice.finish_reason != "stop" or not choice.message.content:
             raise ValueError("本轮解释未完整返回")
-        return KnowledgeObservationDraft.model_validate_json(choice.message.content)
+        draft = ObservationDraft.model_validate_json(choice.message.content)
+        shown = {item["execution_id"]: {c["reference_id"] for c in item.get("items", [])}
+                 for item in payload["executions"]}
+        for finding in draft.findings:
+            for source in finding.sources:
+                reference = source.reference if hasattr(source, "reference") else {"reference_id": source.context_id}
+                reference_id = reference.get("reference_id") or reference.get("context_id")
+                if reference_id not in shown.get(source.execution_id, set()):
+                    raise ValueError("模型引用了未提供的工具结果项")
+        return draft
 
     def formulate_tool_call(self, task, planning_input, *, goal, tools, tool_limits, memory_context=None):
         """只看到本任务已绑定工具的公开声明与参数限制，不接受可信运行对象。"""
@@ -96,14 +116,17 @@ class InvestigationAgent:
         planning_input: InitialPlanningInput,
         *, memory_context=None, previous_observations=(), previous_tasks=(), remaining_task_budget=None,
     ) -> InvestigationPlan:
-        """Plan the knowledge needed for the first investigation round."""
+        """使用当前已注册且可用的能力生成候选调查任务。"""
 
-        if CapabilityType.KNOWLEDGE_RETRIEVAL not in planning_input.available_capabilities:
+        from risk_platform.execution.tools import TOOL_DEFINITIONS
+        supported = {d.capability for d in TOOL_DEFINITIONS.values()}
+        if not set(planning_input.available_capabilities) & supported:
             raise ValueError(
-                "初始计划生成需要 KNOWLEDGE_RETRIEVAL 能力,但可用能力里没有"
+                "初始计划没有可用的已注册工具能力"
             )
 
         context_payload = json.loads(build_initial_planning_context(planning_input))
+        context_payload["available_capabilities"] = [c.value for c in planning_input.available_capabilities if c in supported]
         # 保留各份 Observation 来源；单个 Agent 的 STOP 不是全局停止。
         if previous_observations:
             from risk_platform.workflow.observation import RoundObservation
@@ -144,12 +167,14 @@ class InvestigationAgent:
         draft = _InitialPlanDraft.model_validate_json(content)
         if remaining_task_budget is not None and len(draft.tasks) > remaining_task_budget:
             raise ValueError("候选任务超过剩余预算")
+        if any(task.capability not in planning_input.available_capabilities for task in draft.tasks):
+            raise ValueError("候选计划使用了未提供的能力")
         return InvestigationPlan(
             goal=draft.goal,
             tasks=[
                 InvestigationTask(
                     objective=task.objective,
-                    capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
+                    capability=task.capability,
                     expected_result=task.expected_result,
                 )
                 for task in draft.tasks

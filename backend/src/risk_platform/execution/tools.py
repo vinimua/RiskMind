@@ -14,9 +14,8 @@ from collections.abc import Awaitable, Callable
 from pydantic import BaseModel
 
 from risk_platform.execution import knowledge
-from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, TaskExecutionResult
+from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, KnowledgeExecutionPayload, TaskExecutionResult
 from risk_platform.workflow.contracts import CapabilityType
-from risk_platform.workflow.persistence.contracts import OperationType
 from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime
 
 
@@ -30,16 +29,24 @@ async def _knowledge_handler(task, request, *, runtime_context):
         embedding_client=binding.embedding_client, milvus_client=binding.milvus_client)
 
 
-def _knowledge_model_input(runtime):
+def _knowledge_execution_limits(runtime):
     from risk_platform.workflow.knowledge_tool import knowledge_execution
     trusted = knowledge_execution(runtime, InvestigationAction.CONTINUE)
-    return {"max_top_k": trusted.max_top_k}
+    return {"max_top_k": trusted.max_top_k, "scope": trusted.scope.model_dump(mode="json"),
+            "index_profile": trusted.index_profile.value}
 
 
 def _knowledge_validate_request(runtime, request):
     from risk_platform.workflow.knowledge_tool import knowledge_execution
     if request.top_k > knowledge_execution(runtime, InvestigationAction.CONTINUE).max_top_k:
         raise ValueError("工具请求数量超过本次允许上限")
+
+
+def _knowledge_authorize_result(runtime, result):
+    from risk_platform.workflow.access import _check_execution
+    from risk_platform.workflow.knowledge_tool import knowledge_execution
+    _check_execution(result, knowledge_execution(runtime, InvestigationAction.READ))
+    return True
 
 
 @dataclass(frozen=True)
@@ -62,9 +69,33 @@ class ToolDefinition:
     description: str
     request_model: type[BaseModel]
     handler: Callable[..., Awaitable[TaskExecutionResult]]
-    model_input: Callable[[InvestigationRuntimeContext], dict]
+    # 本次执行的公开范围与限制，随阶段输入固定；不包含客户端、凭证或权限函数。
+    execution_limits: Callable[[InvestigationRuntimeContext], dict]
     validate_request: Callable[[InvestigationRuntimeContext, BaseModel], None]
-    execution_phase: OperationType
+    # 显式声明结果与引用协议，不默认套用知识检索结构。
+    result_model: type[BaseModel]
+    to_observation_items: Callable[[BaseModel], list[dict]]
+    reference_model: type[BaseModel]
+    validate_reference: Callable[[dict, BaseModel], None]
+    # 仅检查工具数据权限；案件归属和运行权由业务授权层检查。
+    authorize_result: Callable[[InvestigationRuntimeContext, TaskExecutionResult], bool]
+    # 核验结果与原请求、执行限制的对应关系。
+    validate_result: Callable[[BaseModel, dict, BaseModel], None]
+    result_version: str = "1"
+
+    def __post_init__(self):
+        if not all(callable(function) for function in (
+            self.handler, self.execution_limits, self.validate_request,
+            self.to_observation_items, self.validate_reference,
+            self.authorize_result, self.validate_result,
+        )):
+            raise TypeError("工具执行、投影和校验字段必须是函数")
+        if not all(isinstance(model, type) and issubclass(model, BaseModel) for model in (
+            self.request_model, self.result_model, self.reference_model,
+        )):
+            raise TypeError("工具参数、结果和引用协议必须是 Pydantic 模型类")
+        if self.name != "knowledge_search" and "reference_id" not in self.reference_model.model_fields:
+            raise ValueError("通用引用协议必须包含结果项 reference_id")
 
     def declaration(self) -> dict:
         # 不把 actor、scope、profile、策略函数或 handler 暴露给模型。
@@ -97,8 +128,13 @@ KNOWLEDGE_SEARCH = ToolDefinition(
     name="knowledge_search", capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
     description="检索带来源的历史案例和模型背景，返回知识线索；不能确认当前案件根因，也不能执行写操作。",
     request_model=KnowledgeSearchToolRequest, handler=_knowledge_handler,
-    model_input=_knowledge_model_input, validate_request=_knowledge_validate_request,
-    execution_phase=OperationType.KNOWLEDGE_EXECUTION,
+    execution_limits=_knowledge_execution_limits, validate_request=_knowledge_validate_request,
+    result_model=KnowledgeExecutionPayload,
+    to_observation_items=knowledge.observation_items,
+    authorize_result=_knowledge_authorize_result,
+    validate_reference=knowledge.validate_reference,
+    reference_model=knowledge.KnowledgeReference,
+    validate_result=knowledge.validate_result,
 )
 TOOL_DEFINITIONS = MappingProxyType({KNOWLEDGE_SEARCH.name: KNOWLEDGE_SEARCH})
 
@@ -183,7 +219,22 @@ async def execute_registered_tool(name: str, task, request, *, runtime_context) 
             capability=task.capability, status="REJECTED", started_at=now, completed_at=now,
             error=ExecutionError(category="AUTHORIZATION", code="TOOL_NOT_BOUND",
                 message="本次运行未绑定所选工具", retryable=False))
-    return await TOOL_DEFINITIONS[name].handler(task, request, runtime_context=runtime_context)
+    definition = TOOL_DEFINITIONS[name]
+    request = definition.request_model.model_validate(request.model_dump() if isinstance(request, BaseModel) else request)
+    definition.validate_request(runtime_context, request)
+    result = await definition.handler(task, request, runtime_context=runtime_context)
+    result = TaskExecutionResult.model_validate_json(result.model_dump_json())
+    if result.task_id != task.task_id or result.capability != task.capability:
+        raise ValueError("工具结果与正式任务身份不一致")
+    if result.tool_name is not None and result.tool_name != name:
+        raise ValueError("工具返回了其他工具的结果")
+    if name != "knowledge_search":
+        result = TaskExecutionResult.model_validate(result.model_dump() | {
+            "tool_name": name, "result_version": definition.result_version})
+    if result.payload is not None and name != "knowledge_search":
+        payload = definition.result_model.model_validate(result.payload.model_dump() if isinstance(result.payload, BaseModel) else result.payload)
+        definition.validate_result(request, definition.execution_limits(runtime_context), payload)
+    return result
 
 
 def required_tool_options() -> dict:
@@ -195,10 +246,10 @@ def required_tool_options() -> dict:
             "extra_body": {"thinking": {"type": "disabled"}}}
 
 
-def query_contract_digest(prompt: str) -> str:
+def query_contract_digest(prompt: str, *, capability=CapabilityType.KNOWLEDGE_RETRIEVAL, names=None) -> str:
     """工具声明和调用协议也是模型输入的一部分，必须参与恢复规格摘要。"""
     payload = {"protocol": "bound-tool-function-call/v3", "system_prompt": prompt,
-               "tools": tool_declarations(CapabilityType.KNOWLEDGE_RETRIEVAL),
+               "tools": tool_declarations(capability, names=names),
                **required_tool_options()}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()

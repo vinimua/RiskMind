@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from openai import APITimeoutError, APIConnectionError, APIStatusError
 from pydantic import ValidationError
+from risk_platform.core.token_budget import ContextBudgetExceeded
 
 from risk_platform.agents.investigation import InvestigationAgent
 from risk_platform.execution.contracts import (
@@ -46,7 +47,7 @@ async def formulate_task_query(task, planning_input, *, goal, investigation_agen
     try:
         offered = available_tools(task.capability, runtime_context)
         declarations = [tool.declaration() for tool in offered]
-        limits = {tool.name: tool.model_input(runtime_context) for tool in offered}
+        limits = {tool.name: tool.execution_limits(runtime_context) for tool in offered}
         # 只传公开声明和参数限制，运行身份、权限回调不进入模型输入。
         async with asyncio.timeout(runtime_context.timeout_seconds):
             call = await asyncio.to_thread(
@@ -140,7 +141,7 @@ async def task_execution(
                 ))
             return QueryOutcome(candidate=candidate.arguments, tool_name=candidate.tool_name)
 
-        formed = await phase(OperationType.QUERY_FORMULATION, query, task_id=task.task_id)
+        formed = await phase(OperationType.QUERY_FORMULATION, query, task_id=task.task_id, capability=task.capability)
         if formed.failure is not None:
             result = formed.failure
         else:
@@ -153,8 +154,9 @@ async def task_execution(
                 )
                 # 入账前校验身份，不能先保存错误结果再拒绝写 State。
                 return _task_result(task, result)
-            result = await phase(definition.execution_phase, execute_selected,
-                                 task_id=task.task_id, candidate=selected.arguments, tool_name=selected.tool_name)
+            result = await phase(OperationType.TOOL_EXECUTION, execute_selected,
+                                 task_id=task.task_id, candidate=selected.arguments, tool_name=selected.tool_name,
+                                 capability=task.capability)
         result = _task_result(task, result)
         if any(previous.execution_id == result.execution_id for previous in results):
             raise ValueError("本轮执行记录 ID 不能重复")
@@ -192,14 +194,14 @@ async def _interpret_observation(
     """先校验执行事实，再解释并验证来源。没有知识或解释失败时明确不确定。"""
     plan, results = validate_round_inputs(state["investigation_plan"], state["task_execution_results"])
     summaries, _ = summarize_executions(results)
-    if not any(item.outcome == "KNOWLEDGE_AVAILABLE" for item in summaries):
+    if not any(item.outcome in ("KNOWLEDGE_AVAILABLE", "RESULT_AVAILABLE") for item in summaries):
         return {"observation": inconclusive_observation(
             results, "NO_KNOWLEDGE_AVAILABLE", "本轮没有可用于解释的知识，未调用解释模型",
         )}
     try:
         async with asyncio.timeout(runtime_context.timeout_seconds):
             draft = await asyncio.to_thread(
-                investigation_agent.observe_knowledge_round, plan.model_copy(deep=True),
+                investigation_agent.observe_round, plan.model_copy(deep=True),
                 [result.model_copy(deep=True) for result in results],
                 planning_input=_business_model(InitialPlanningInput, state["planning_input"]).model_copy(deep=True),
                 available_capabilities=tuple(
@@ -208,6 +210,8 @@ async def _interpret_observation(
                 ),
             )
         output = complete_observation(results, draft)
+    except ContextBudgetExceeded:
+        output = inconclusive_observation(results, "OBSERVATION_INPUT_BUDGET_EXCEEDED", "工具结果超出解释输入预算，未形成结论")
     except (TimeoutError, APITimeoutError):
         output = inconclusive_observation(results, "OBSERVATION_TIMEOUT", "本轮知识解释超时")
     except (ValidationError, ValueError):

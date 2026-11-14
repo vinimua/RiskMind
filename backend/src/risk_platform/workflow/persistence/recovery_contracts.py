@@ -2,7 +2,29 @@
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, BaseModel, ConfigDict, model_validator
+from risk_platform.execution.contracts import TaskExecutionResult
+from risk_platform.workflow.observation import RoundObservation
+
+
+class RegisteredCall(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    tool_name: str
+    arguments: dict
+
+
+class ToolArtifact(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[3] = 3
+    query_request: RegisteredCall | None = None
+    execution: TaskExecutionResult | None = None
+    observation: RoundObservation | None = None
+
+    @model_validator(mode="after")
+    def exactly_one(self):
+        if sum(v is not None for v in (self.query_request, self.execution, self.observation)) != 1:
+            raise ValueError("阶段产物必须且只能包含一种结果")
+        return self
 
 from .contracts import CommittedArtifact, Digest, Identity, LedgerContract
 

@@ -44,7 +44,7 @@ replanning（当前仅结束本轮，案件 OPEN）→ END
 正式执行入口现在只有 InvestigationRunner.ainvoke；原非持久化入口已移除。
 build_investigation_graph 仅供 runner 内部构图，必须配置账本与 checkpoint，并提供入口生成的有效 claim。
 prepare_plan 现在在图内生成候选并正式接受，也能直接读取已有计划；单元测试显式注入阶段替身。
-调查和轮次仍由可信调用方提前登记；初始计划不再要求在图外手工准备。详细恢复边界见[图内初始规划](../workflow-initial-planning-recovery.md)。
+调查和轮次仍由可信调用方提前登记；初始计划不再要求在图外手工准备。详细恢复边界见图内初始规划。
 
 ## 2. 调用方式
 
@@ -252,6 +252,6 @@ P2-11 的权限组合已实现为 CONTINUE + READ，待本阶段 review；P2-8 �
 
 ## 执行模块职责拆分
 
-当前入口和内部实现的阅读顺序见 [Workflow 执行模块指南](../workflow-execution-module-guide.md)。`recovery.py` 仅保留旧导入兼容；首次与恢复都使用 `runner.InvestigationRunner`。数据库协议和三段事务未改变。
+当前入口和内部实现的阅读顺序见 Workflow 执行模块指南。`recovery.py` 仅保留旧导入兼容；首次与恢复都使用 `runner.InvestigationRunner`。数据库协议和三段事务未改变。
 
-当前运行与阶段协议分离需要 0008 迁移；旧运行和规划 payload 不改写，但 v1 恢复支持已移除，遇到时明确拒绝。详见 [执行边界指南](../workflow-execution-module-guide.md)。
+当前运行与阶段协议分离需要 0008 迁移；旧运行和规划 payload 不改写，但 v1 恢复支持已移除，遇到时明确拒绝。详见 执行边界指南。

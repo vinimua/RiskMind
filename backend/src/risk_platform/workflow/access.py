@@ -9,7 +9,7 @@ from risk_platform.workflow.runtime import (
     InvestigationAccessError, InvestigationAction, InvestigationRuntimeContext, check_runtime,
 )
 from risk_platform.workflow.persistence import repository as ledger
-from risk_platform.workflow.persistence.business_inputs import AttemptAttribution, BusinessOperationInput, business_projection
+from risk_platform.workflow.persistence.business_inputs import AttemptAttribution, BusinessOperationInput, ToolOperationInput, ToolAttemptAttribution, business_projection
 from risk_platform.workflow.persistence.contracts import (
     CommittedArtifact, InvestigationRecord, OperationType, RoundRecord, canonical_json, input_digest,
 )
@@ -106,6 +106,39 @@ def _check_execution(result, trusted):
             document_version=hit.source.document_version, document_types=[hit.document_type]))
 
 
+def _check_registered_result(result, context):
+    if result.tool_name in (None, "knowledge_search"):
+        if result.payload is None:
+            return  # 请求形成失败，没有工具数据可泄露；操作归属仍由调用方核验。
+        _check_execution(result, knowledge_execution(context, InvestigationAction.READ))
+        return
+    from risk_platform.execution.tools import tool_definition
+    definition = tool_definition(result.tool_name)
+    if not any(binding.name == result.tool_name for binding in context.tools):
+        raise InvestigationAccessError("历史结果工具当前未授权")
+    if definition.authorize_result is None or definition.authorize_result(context, result) is not True:
+        raise InvestigationAccessError("当前权限不能读取此工具结果")
+
+
+async def _check_registered_operation(session, value, context):
+    from risk_platform.execution.tools import tool_definition
+    _belongs(value, context)
+    for name, recorded in value.tool_limits.items():
+        definition = tool_definition(name)
+        if value.capability is not None and definition.capability != value.capability:
+            raise InvestigationAccessError("工具能力不属于当前正式任务")
+        if not any(binding.name == name for binding in context.tools):
+            raise InvestigationAccessError("工具当前未绑定")
+        if definition.execution_limits(context) != recorded:
+            raise InvestigationAccessError("工具范围或输入限制已变化，不能沿用原记录")
+        if value.candidate_request is not None:
+            request = definition.request_model.model_validate(value.candidate_request)
+            definition.validate_request(context, request)
+    if value.operation_type == OperationType.OBSERVATION:
+        for result in await ledger._observation_results(session, value):
+            _check_registered_result(result, context)
+
+
 async def _check_business(session, value, trusted, *, continuing):
     if value.operation_type == OperationType.KNOWLEDGE_EXECUTION:
         if trusted.index_profile != value.index_profile or value.candidate_request.top_k > trusted.max_top_k:
@@ -132,6 +165,11 @@ async def _check_business(session, value, trusted, *, continuing):
 
 
 async def register_authorized_operation(session, value: BusinessOperationInput, *, context):
+    if isinstance(value, ToolOperationInput):
+        await _bound_context(session, context, InvestigationAction.CONTINUE)
+        await _check_registered_operation(session, value, context)
+        row = await ledger.register_operation(session, value, created_by=context.actor_id)
+        return row.operation_key
     trusted = await _knowledge_bound_context(session, context, InvestigationAction.CONTINUE)
     value = BusinessOperationInput.model_validate_json(value.model_dump_json())
     _belongs(value, context)
@@ -141,6 +179,15 @@ async def register_authorized_operation(session, value: BusinessOperationInput, 
 
 
 async def start_authorized_attempt(session, key: str, attempt_id: str, *, context, retry=False):
+    row = await session.get(OperationRow, key)
+    if row is not None and row.schema_version == 3:
+        await _bound_context(session, context, InvestigationAction.CONTINUE)
+        stored = ledger.read_operation(row)
+        await _check_registered_operation(session, stored, context)
+        attribution = ToolAttemptAttribution(investigation_id=stored.investigation_id, round_id=stored.round_id,
+                                            actor_id=context.actor_id, tool_limits=stored.tool_limits)
+        attempt = await ledger.start_attempt(session, key, attempt_id, retry=retry, attribution=attribution)
+        return AttemptReceipt(attempt.attempt_id, attempt.status, attempt.actor_id)
     trusted = await _knowledge_bound_context(session, context, InvestigationAction.CONTINUE)
     row = await session.get(OperationRow, key)
     if row is None:
@@ -155,10 +202,15 @@ async def start_authorized_attempt(session, key: str, attempt_id: str, *, contex
 
 
 async def read_operation_history(session, expected: BusinessOperationInput, *, context):
-    trusted = await _knowledge_bound_context(session, context, InvestigationAction.READ)
-    expected = BusinessOperationInput.model_validate_json(expected.model_dump_json())
+    generic = isinstance(expected, ToolOperationInput)
+    trusted = (await _bound_context(session, context, InvestigationAction.READ) if generic else
+               await _knowledge_bound_context(session, context, InvestigationAction.READ))
+    expected = type(expected).model_validate_json(expected.model_dump_json())
     _belongs(expected, context)
-    await _check_business(session, expected, trusted, continuing=False)
+    if generic:
+        await _check_registered_operation(session, expected, context)
+    else:
+        await _check_business(session, expected, trusted, continuing=False)
     history = await ledger.inspect_operation(session, expected)
     if history is None:
         return None
@@ -166,7 +218,9 @@ async def read_operation_history(session, expected: BusinessOperationInput, *, c
     for attempt, artifact in history:
         attribution = None
         if attempt.runtime_payload is not None:
-            attribution = AttemptAttribution.model_validate_json(attempt.runtime_payload)
+            import json
+            contract = ToolAttemptAttribution if json.loads(attempt.runtime_payload).get("schema_version") == 2 else AttemptAttribution
+            attribution = contract.model_validate_json(attempt.runtime_payload)
             if (input_digest(attribution) != attempt.runtime_digest or canonical_json(attribution) != attempt.runtime_payload
                     or attribution.actor_id != attempt.actor_id):
                 raise ledger.LedgerIntegrityError("尝试身份审计载荷损坏")
@@ -174,11 +228,17 @@ async def read_operation_history(session, expected: BusinessOperationInput, *, c
             raise ledger.LedgerIntegrityError("尝试身份审计记录不完整")
         if artifact is not None:
             if artifact.execution is not None:
-                _check_execution(artifact.execution, trusted)
+                if generic:
+                    _check_registered_result(artifact.execution, context)
+                else:
+                    _check_execution(artifact.execution, trusted)
             elif artifact.observation is not None:
                 # 旧 v1/v2 均需重验支撑执行的当前可读范围，不因已有解释就绕过。
                 for result in await ledger._observation_results(session, expected):
-                    _check_execution(result, trusted)
+                    if generic:
+                        _check_registered_result(result, context)
+                    else:
+                        _check_execution(result, trusted)
         output.append(AttemptFact(attempt.attempt_id, attempt.attempt_number, attempt.status, attempt.resolution_code,
                                   attempt.started_at, attempt.ended_at, attempt.actor_id, attribution, artifact))
     return tuple(output)

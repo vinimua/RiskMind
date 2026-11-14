@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator, field_validator
 
 from risk_platform.knowledge.context_resolution import ContextResolutionResult
 from risk_platform.knowledge.contracts import KnowledgeFilters, KnowledgeSearchRequest, _NonBlankString
@@ -89,16 +89,36 @@ class TaskExecutionResult(ExecutionContract):
     status: ExecutionStatus
     started_at: AwareDatetime
     completed_at: AwareDatetime
-    payload: KnowledgeExecutionPayload | None = None
+    # 无 tool_name 的既有知识记录保持原格式；新通用结果显式声明工具及结果版本。
+    tool_name: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    result_version: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    payload: KnowledgeExecutionPayload | dict | None = None
     error: ExecutionError | None = None
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def legacy_payload(cls, value, info):
+        if value is not None and info.data.get("tool_name") in (None, "knowledge_search"):
+            return KnowledgeExecutionPayload.model_validate(value)
+        return value
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
         if self.completed_at < self.started_at:
             raise ValueError("执行完成时间不能早于开始时间")
         if self.status == ExecutionStatus.SUCCEEDED:
-            if self.payload is None or self.error is not None or self.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
+            if self.payload is None or self.error is not None:
                 raise ValueError("成功知识执行必须包含载荷且不能包含错误")
+            if self.tool_name is None:
+                if not isinstance(self.payload, KnowledgeExecutionPayload) or self.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
+                    raise ValueError("旧格式仅支持知识执行；其他结果必须声明工具及协议版本")
+            else:
+                # 延迟导入避免注册定义与契约的循环；动态模型只来自可信注册表。
+                from risk_platform.execution.tools import tool_definition
+                definition = tool_definition(self.tool_name)
+                if definition.capability != self.capability or definition.result_version != self.result_version:
+                    raise ValueError("工具能力或结果版本不匹配")
+                definition.result_model.model_validate(self.payload.model_dump() if isinstance(self.payload, BaseModel) else self.payload)
         elif self.payload is not None or self.error is None:
             raise ValueError("失败或拒绝执行必须包含错误且不能包含部分载荷")
         return self

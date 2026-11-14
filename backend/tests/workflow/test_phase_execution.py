@@ -37,8 +37,8 @@ def test_shared_loop_and_observation_use_phase_executor_in_business_order(monkey
         assert update["observation"].status == "INCONCLUSIVE"
     asyncio.run(scenario())
     assert phases == [
-        (OperationType.QUERY_FORMULATION, "T0"), (OperationType.KNOWLEDGE_EXECUTION, "T0"),
-        (OperationType.QUERY_FORMULATION, "T1"), (OperationType.KNOWLEDGE_EXECUTION, "T1"),
+        (OperationType.QUERY_FORMULATION, "T0"), (OperationType.TOOL_EXECUTION, "T0"),
+        (OperationType.QUERY_FORMULATION, "T1"), (OperationType.TOOL_EXECUTION, "T1"),
         (OperationType.OBSERVATION, None),
     ]
 

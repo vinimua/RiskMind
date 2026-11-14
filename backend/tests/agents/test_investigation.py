@@ -89,10 +89,11 @@ def test_initial_plan_converts_draft_to_system_managed_tasks() -> None:
     assert call["model"] == "glm-4.7-flash"
     assert call["response_format"] == {"type": "json_object"}
     assert "不生成 Hypothesis" in call["messages"][0]["content"]
-    assert "不得输出 capability" in call["messages"][0]["content"]
+    assert "available_capabilities" in call["messages"][0]["content"]
     context = json.loads(call["messages"][1]["content"])
     assert context == {
         "source": "USER_QUERY",
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL"],
         "query": "为什么 credit_v3 最近 KS 下降？",
         "model_id": "credit_v3",
         "time_window": None,
@@ -116,6 +117,7 @@ def test_initial_plan_serializes_monitoring_alert_as_json_data() -> None:
     context = json.loads(client.completions.calls[0]["messages"][1]["content"])
     assert context == {
         "source": "MONITORING_ALERT",
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL"],
         "alert_id": "ALERT-001",
         "model_id": "credit_v3",
         "metric": "KS",
@@ -148,7 +150,7 @@ def test_initial_plan_requires_knowledge_retrieval_capability() -> None:
         ],
     )
 
-    with pytest.raises(ValueError, match="需要 KNOWLEDGE_RETRIEVAL 能力"):
+    with pytest.raises(ValueError, match="没有可用的已注册工具能力"):
         agent.initial_plan(planning_input)
 
     assert client.completions.calls == []
@@ -168,7 +170,7 @@ def test_initial_plan_requires_knowledge_retrieval_capability() -> None:
                 {
                     "objective": "查历史",
                     "expected_result": "获得案例",
-                    "capability": "KNOWLEDGE_RETRIEVAL",
+                    "capability": "UNKNOWN_CAPABILITY",
                 }
             ],
         },

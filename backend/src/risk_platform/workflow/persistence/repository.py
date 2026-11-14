@@ -8,15 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from risk_platform.workflow.contracts import CapabilityType, TaskStatus
 from risk_platform.workflow.observation import (
-    KnowledgeObservationDraft, summarize_executions, validate_observation_draft, validate_round_inputs,
+    ObservationDraft, summarize_executions, validate_observation_draft, validate_round_inputs,
 )
 from .contracts import (
     AcceptedPlan, AttemptStatus, CommittedArtifact, Identity, InvestigationRecord, OperationInput,
     OperationType, RoundRecord, canonical_json, input_digest, operation_key,
 )
 from .models import AcceptedPlanRow, AttemptRow, InvestigationRow, OperationRow, PlanTaskRow, ResultRow, RoundRow
-from .business_inputs import AttemptAttribution, BusinessOperationInput, business_projection
-from .recovery_contracts import PhaseArtifact
+from .business_inputs import AttemptAttribution, BusinessOperationInput, ToolOperationInput, business_projection
+from .recovery_contracts import PhaseArtifact, ToolArtifact
 
 
 class LedgerConflictError(ValueError):
@@ -45,12 +45,16 @@ def _read(row, contract):
 
 
 def read_operation(row) -> OperationInput | BusinessOperationInput:
+    if row.schema_version == 3:
+        return _read(row, ToolOperationInput)
     if row.schema_version not in (1, 2):
         raise LedgerIntegrityError("未知操作契约版本")
     return _read(row, OperationInput if row.schema_version == 1 else BusinessOperationInput)
 
 
 def read_artifact(row) -> CommittedArtifact | PhaseArtifact:
+    if row.schema_version == 3:
+        return _read(row, ToolArtifact)
     if row.schema_version not in (1, 2):
         raise LedgerIntegrityError("未知产物契约版本")
     return _read(row, CommittedArtifact if row.schema_version == 1 else PhaseArtifact)
@@ -100,12 +104,13 @@ async def register_operation(session: AsyncSession, value: OperationInput | Busi
     _read(plan, AcceptedPlan)
     if value.task_id is not None:
         task = await session.get(PlanTaskRow, (value.plan_id, value.task_id))
-        if task is None or task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL.value:
+        expected = value.capability if isinstance(value, ToolOperationInput) else CapabilityType.KNOWLEDGE_RETRIEVAL.value
+        if task is None or task.capability != expected:
             raise LedgerIntegrityError("当前账本操作只支持计划中的正式知识任务")
     if value.operation_type == OperationType.OBSERVATION:
         await _observation_results(session, value)
     key = operation_key(value)
-    if isinstance(value, BusinessOperationInput):
+    if isinstance(value, (BusinessOperationInput, ToolOperationInput)):
         TypeAdapter(Identity).validate_python(created_by)
         # 同 key 已有 v1 时保持原文和摘要，显式验证稳定业务输入，不伪装成 v2。
         await _lock(session, f"record:{OperationRow.__tablename__}:{key}")
@@ -200,6 +205,34 @@ async def _observation_results(session, operation):
 
 
 async def _validate_artifact(session, operation, artifact):
+    if isinstance(operation, ToolOperationInput) and operation.operation_type != OperationType.OBSERVATION:
+        from risk_platform.execution.tools import tool_definition
+        if not isinstance(artifact, ToolArtifact):
+            raise LedgerIntegrityError("通用操作必须保存通用版本产物")
+        if operation.operation_type == OperationType.QUERY_FORMULATION:
+            if artifact.query_request is not None:
+                call = artifact.query_request
+                definition = tool_definition(call.tool_name)
+                if call.tool_name not in operation.tool_limits or definition.capability != operation.capability:
+                    raise LedgerIntegrityError("工具选择不属于本次任务或允许列表")
+                definition.request_model.model_validate(call.arguments)
+            elif (artifact.execution is None or artifact.execution.task_id != operation.task_id or
+                  artifact.execution.capability != operation.capability or artifact.execution.status == "SUCCEEDED"):
+                raise LedgerIntegrityError("请求形成产物与任务不匹配")
+        else:
+            result = artifact.execution
+            if (result is None or result.task_id != operation.task_id or result.capability != operation.capability or
+                    result.tool_name != operation.tool_name):
+                raise LedgerIntegrityError("工具结果与操作身份不一致")
+            definition = tool_definition(operation.tool_name)
+            if result.result_version != definition.result_version:
+                raise LedgerIntegrityError("工具结果协议版本不一致")
+            definition.request_model.model_validate(operation.candidate_request)
+            if result.payload is not None:
+                payload = definition.result_model.model_validate(result.payload)
+                definition.validate_result(definition.request_model.model_validate(operation.candidate_request),
+                                              operation.tool_limits[operation.tool_name], payload)
+        return
     if operation.operation_type == OperationType.QUERY_FORMULATION:
         if artifact.query_request is None:
             failed = artifact.execution
@@ -250,7 +283,7 @@ async def _validate_artifact(session, operation, artifact):
             # 新提交只接受 v2；旧格式由 read_artifact 保持原文回查。
             if getattr(observation, "schema_version", None) != 2:
                 raise LedgerIntegrityError("旧 Observation 只读，不能作为新解释提交")
-            validate_observation_draft(KnowledgeObservationDraft(
+            validate_observation_draft(ObservationDraft(
                 findings=observation.findings, unresolved_questions=observation.unresolved_questions,
                 action=observation.action, stop_reason=observation.stop_reason,
             ), results)
@@ -293,7 +326,7 @@ async def inspect_operation(session: AsyncSession, value: OperationInput | Busin
     if row is None:
         return None
     stored = read_operation(row)
-    matches = business_projection(stored) == value if isinstance(value, BusinessOperationInput) else stored == value
+    matches = business_projection(stored) == value if isinstance(value, (BusinessOperationInput, ToolOperationInput)) else stored == value
     if not matches:
         raise LedgerConflictError("同一逻辑操作的输入摘要冲突")
     history = []

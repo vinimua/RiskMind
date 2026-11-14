@@ -74,9 +74,9 @@ class OperationRow(PayloadRow, Base):
         ForeignKeyConstraint(["plan_id", "investigation_id", "round_id"],
                              ["investigation_plans.plan_id", "investigation_plans.investigation_id", "investigation_plans.round_id"]),
         ForeignKeyConstraint(["plan_id", "task_id"], ["investigation_plan_tasks.plan_id", "investigation_plan_tasks.task_id"]),
-        CheckConstraint("schema_version IN (1,2) AND (schema_version = 1 OR created_by IS NOT NULL)", name="ck_ledger_operation_schema"),
+        CheckConstraint("schema_version IN (1,2,3) AND (schema_version = 1 OR created_by IS NOT NULL)", name="ck_ledger_operation_schema"),
         CheckConstraint("(operation_type = 'OBSERVATION' AND task_id IS NULL) OR "
-                        "(operation_type IN ('QUERY_FORMULATION', 'KNOWLEDGE_EXECUTION') AND task_id IS NOT NULL)",
+                        "(operation_type IN ('QUERY_FORMULATION', 'KNOWLEDGE_EXECUTION', 'TOOL_EXECUTION') AND task_id IS NOT NULL)",
                         name="ck_ledger_operation_type"),
         Index("uq_ledger_task_operation", "plan_id", "task_id", "operation_type", unique=True,
               postgresql_where=text("task_id IS NOT NULL")),
@@ -130,5 +130,5 @@ class ResultRow(PayloadRow, Base):
                              name="fk_ledger_result_committed_attempt", use_alter=True, deferrable=True, initially="DEFERRED"),
         UniqueConstraint("result_id", "attempt_id", name="uq_ledger_result_attempt"),
         UniqueConstraint("result_id", "operation_key", name="uq_ledger_result_operation"),
-        CheckConstraint("schema_version IN (1,2) AND NOT (execution_id IS NOT NULL AND observation_id IS NOT NULL)", name="ck_ledger_result"),
+        CheckConstraint("schema_version IN (1,2,3) AND NOT (execution_id IS NOT NULL AND observation_id IS NOT NULL)", name="ck_ledger_result"),
     )

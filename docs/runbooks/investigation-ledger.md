@@ -182,7 +182,7 @@ schema、触发器、事务和并发行为已通过 review。下一阶段为 8B 
 P2-9：v1 OperationInput 保存完整 KnowledgeExecutionContext，actor_id/timeout 等运行字段也影响输入摘要。
 当前行为 fail-closed，不重开 8A。8B 需区分不可变业务输入与每次调用的当前身份/授权/预算，
 并记录每个新 Attempt 的真实发起人。旧 Attempt 不能从 Operation 的 actor 推断成已经证明的实际执行人。
-具体边界见 [Stage 8B 设计](../workflow-persistence-resume-design.md#18-stage-8b-可信运行上下文与授权边界)。
+具体边界见 Stage 8B 设计。
 
 8B 实现补充：原 v1 契约和 0004 未改写，0005 新增 v2 Operation 创作者和 Attempt 发起人审计。
 新调用 start_attempt 必须显式提供 AttemptAttribution，数据库也拒绝缺失审计的新 Attempt。

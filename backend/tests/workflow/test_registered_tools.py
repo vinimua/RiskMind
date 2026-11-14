@@ -14,6 +14,32 @@ from workflow_test_helpers import runtime_for
 from test_observation import execution
 
 
+def test_tool_definition_has_no_workflow_phase_or_ambiguous_callbacks():
+    from dataclasses import fields
+    names = {field.name for field in fields(tools.ToolDefinition)}
+    assert not {"execution_phase", "model_input", "validate_execution"} & names
+    assert {"execution_limits", "validate_result", "authorize_result"} <= names
+
+
+def test_tool_definition_requires_explicit_result_protocol():
+    from dataclasses import fields
+    values = {field.name: getattr(tools.KNOWLEDGE_SEARCH, field.name)
+              for field in fields(tools.ToolDefinition)}
+    del values["result_model"]
+    with pytest.raises(TypeError, match="result_model"):
+        tools.ToolDefinition(**values)
+
+
+def test_tool_definition_rejects_missing_result_projection():
+    with pytest.raises(TypeError):
+        replace(tools.KNOWLEDGE_SEARCH, to_observation_items=None)
+
+
+def test_tool_definition_rejects_result_instance_instead_of_model_class():
+    with pytest.raises(TypeError):
+        replace(tools.KNOWLEDGE_SEARCH, result_model=dict)
+
+
 def test_registered_schema_has_no_identity_and_cannot_be_mutated_by_caller():
     declarations = tools.tool_declarations(CapabilityType.KNOWLEDGE_RETRIEVAL)
     assert declarations[0]["function"]["name"] == KnowledgeSearchTool.name
@@ -54,8 +80,8 @@ def test_registered_dispatch_delegates_to_existing_adapter(monkeypatch):
     task, request, trusted = state(1)["investigation_plan"].tasks[0], {"query": "q", "top_k": 1}, context()
     result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, request,
         runtime_context=runtime_for(state()["planning_input"], trusted)))
-    assert result is expected and len(seen) == 1
-    assert seen[0][:2] == (task, request)
+    assert result == expected and len(seen) == 1
+    assert seen[0][0] == task and seen[0][1].query == request["query"]
     assert seen[0][2]["context"] == trusted
     assert seen[0][2]["authorize"](trusted.actor_id, "knowledge:search", trusted) is True
 

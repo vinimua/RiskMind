@@ -7,7 +7,7 @@ from risk_platform.workflow.contracts import CapabilityType
 from risk_platform.workflow.knowledge_tool import knowledge_execution
 from risk_platform.workflow.runtime import InvestigationAction
 from . import repository as ledger
-from .business_inputs import AttemptAttribution
+from .business_inputs import AttemptAttribution, ToolAttemptAttribution
 from .contracts import AcceptedPlan, canonical_json, input_digest
 from .planning_contracts import PlanningCandidate, PlanningInput
 from .planning_models import PlanningAttemptRow, PlanningRunRow
@@ -50,7 +50,8 @@ def validate(value, spec, source):
     plan = value.plan
     if not plan.goal.strip() or any(not t.objective.strip() or not t.expected_result.strip() for t in plan.tasks):
         raise ValueError("计划目标、任务目标和预期结果不能为空")
-    allowed = set(source.available_capabilities) & {CapabilityType.KNOWLEDGE_RETRIEVAL}
+    from risk_platform.execution.tools import TOOL_DEFINITIONS
+    allowed = set(source.available_capabilities) & {d.capability for d in TOOL_DEFINITIONS.values()}
     if any(t.capability not in allowed for t in plan.tasks):
         raise ValueError("初始计划只能使用当前调查允许的知识检索能力")
     # 只构造待接受值做校验；此处不会写入正式计划。
@@ -59,8 +60,10 @@ def validate(value, spec, source):
 
 
 async def start(session, spec, *, context, trusted, claim_id, number):
-    attribution = AttemptAttribution(investigation_id=context.investigation.investigation_id,
-        round_id=context.round.round_id, actor_id=trusted.actor_id, execution_context=knowledge_execution(context, InvestigationAction.CONTINUE))
+    from risk_platform.execution.tools import tool_definition
+    attribution = ToolAttemptAttribution(investigation_id=context.investigation.investigation_id,
+        round_id=context.round.round_id, actor_id=trusted.actor_id,
+        tool_limits={b.name: tool_definition(b.name).execution_limits(context) for b in context.tools})
     row = PlanningAttemptRow(attempt_id="planning-attempt-" + uuid4().hex, run_id=spec.execution.run_id,
         attempt_number=number, actor_id=trusted.actor_id, claim_id=claim_id,
         attribution=canonical_json(attribution), attribution_digest=input_digest(attribution), status="STARTED")

@@ -31,7 +31,7 @@ from risk_platform.workflow import access
 from risk_platform.workflow.access import load_runtime_context
 from risk_platform.workflow.checkpoints import JsonCheckpointSerializer, postgres_checkpointer
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan, InvestigationTask, UserQuery
-from risk_platform.workflow.observation import KnowledgeObservationDraft
+from risk_platform.workflow.observation import ObservationDraft
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.business_inputs import BusinessOperationInput
 from risk_platform.workflow.persistence.contracts import AcceptedPlan, InvestigationRecord, RoundRecord
@@ -64,9 +64,9 @@ class Agent:
             raise ValueError("invalid model output")
         return tool_call(KnowledgeSearchToolRequest(query="Query " + task.task_id, top_k=1))
 
-    def observe_knowledge_round(self, plan, results, **options):
+    def observe_round(self, plan, results, **options):
         self.events.append("observation")
-        return KnowledgeObservationDraft(findings=tuple({
+        return ObservationDraft(findings=tuple({
             "statement": "Historical knowledge only; current case unverified",
             "sources": ({"execution_id": row.execution_id, "context_id": row.payload.resolved.contexts[0].context_id,
                 "source": row.payload.resolved.contexts[0].supporting_hits[0].source,

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError
-from pydantic import ValidationError
+from pydantic import ValidationError, BaseModel, ConfigDict
 from pymilvus.exceptions import MilvusException
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -15,10 +15,54 @@ from risk_platform.execution.contracts import (
     KnowledgeExecutionPayload, KnowledgeSearchToolRequest, TaskExecutionResult,
 )
 from risk_platform.knowledge.context_resolution import ContextResolutionIntegrityError, resolve_knowledge_contexts
-from risk_platform.knowledge.contracts import KnowledgeFilters
+from risk_platform.knowledge.contracts import KnowledgeFilters, KnowledgeSourceRef
 from risk_platform.knowledge.retrieval import ChildRetrievalIntegrityError, retrieve_dense_children
 from risk_platform.knowledge.serving import MissingServingRouteError
 from risk_platform.workflow.contracts import CapabilityType, InvestigationTask
+
+
+class KnowledgeReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    context_id: str
+    source: KnowledgeSourceRef
+    quote: str
+
+
+def observation_items(payload):
+    return [dict(reference_id=c.context_id, content=c.content,
+                 sources=[hit.source.model_dump(mode="json") for hit in c.supporting_hits])
+            for c in payload.resolved.contexts]
+
+
+def validate_reference(reference, payload):
+    ref = KnowledgeReference.model_validate(reference)
+    contexts = [c for c in payload.resolved.contexts if c.context_id == ref.context_id]
+    if len(contexts) != 1 or not ref.quote or ref.quote not in contexts[0].content:
+        raise ValueError("知识引用的上下文或引文不匹配")
+    if ref.source not in [hit.source for hit in contexts[0].supporting_hits]:
+        raise ValueError("知识引用来源不属于当前结果")
+
+
+def validate_result(request, limits, payload):
+    if (request.query != payload.request.query or request.top_k != payload.request.top_k or
+            request.top_k > limits["max_top_k"] or
+            payload.retrieved.snapshot.index_profile != limits["index_profile"]):
+        raise ValueError("知识结果与本次请求或索引协议不匹配")
+    expected = request.filters.model_dump(mode="json")
+    for field, allowed in limits["scope"].items():
+        if allowed is None or allowed == []:
+            continue
+        supplied = expected[field]
+        if field == "document_types":
+            if supplied and not set(supplied) <= set(allowed):
+                raise ValueError("知识请求超出允许类型")
+            expected[field] = supplied or allowed
+        else:
+            if supplied is not None and supplied != allowed:
+                raise ValueError("知识请求超出范围")
+            expected[field] = allowed
+    if payload.request.filters.model_dump(mode="json") != expected:
+        raise ValueError("知识实际执行范围与允许范围不一致")
 
 
 def _scoped_request(candidate, context: KnowledgeExecutionContext) -> KnowledgeSearchToolRequest:

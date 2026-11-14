@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, inspect, make_url, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from risk_platform.workflow.observation import KnowledgeObservationDraft, complete_observation, inconclusive_observation
+from risk_platform.workflow.observation import ObservationDraft, complete_observation, inconclusive_observation
 from risk_platform.workflow.persistence.contracts import (
     AttemptStatus, CommittedArtifact, OperationType, RoundRecord, canonical_json, input_digest, operation_key,
 )
@@ -261,7 +261,7 @@ def test_observation_identity_references_and_payload_are_persisted(database, inc
             row = await register_operation(session, value)
             await start_attempt(session, row.operation_key, "observation-attempt")
         observation = (inconclusive_observation([result], "MODEL_UNAVAILABLE", "解释不可用") if inconclusive
-                       else complete_observation([result], KnowledgeObservationDraft.model_validate(draft([result]))))
+                       else complete_observation([result], ObservationDraft.model_validate(draft([result]))))
         async with sessions.begin() as session:
             await commit_result(session, "observation-attempt", "observation-result", CommittedArtifact(observation=observation))
         async with sessions() as session:

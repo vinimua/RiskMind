@@ -1015,7 +1015,7 @@ scope/index_profile/max_top_k/工具超时、独立知识授权和无模型范�
 
 首次执行与恢复继续走同一持久化 runner，历史 FirstRoundSpec、业务摘要、Attempt 归因
 和数据库 schema 不变。现有首轮 runner 仍只支持知识任务；通用 Runtime 不代表已实现其他工具。
-完整设计与接入示例见 [可信环境与知识工具](workflow-trusted-tools.md)。
+完整设计与接入示例见 可信环境与知识工具。
 
 
 ## 最小原生工具选择接入
@@ -1024,7 +1024,7 @@ scope/index_profile/max_top_k/工具超时、独立知识授权和无模型范�
 并生成专用参数。execution/tools.py 保存声明与 handler 映射，实际执行复用 7A。
 只接受一次调用，不增加图节点、模型调用次数或自由 ReAct 工具循环；当前只有一个工具。
 工具声明和协议参数参与查询调用摘要，旧摘要运行不自动迁移。
-详见 [工具注册与模型选择](workflow-tool-registration.md)。
+详见 工具注册与模型选择。
 
 
 ## 通用任务入口的工具上下文隔离
@@ -1033,7 +1033,7 @@ execute_node/task_execution 只接收 InvestigationRuntimeContext，不预取知
 工具列表按注册、任务 capability、本次可信绑定取交集；模型选择后的 ToolCall 保留工具名，
 由所选 handler 取得专用上下文和授权。通用资源 _authorize 不再隐式要求知识工具。
 现有持久化规格仍明确只支持知识阶段，其他工具名不能写入旧知识载荷。
-见 [通用任务执行边界](workflow-generic-task-execution.md)。
+见 通用任务执行边界。
 
 
 ## 工具运行依赖归属
@@ -1042,11 +1042,11 @@ execute_node/task_execution 只接收 InvestigationRuntimeContext，不预取知
 所选知识 handler 自行读取。通用 task_execution/工具分派不透传知识客户端，
 graph 和 FirstRoundRecovery 只保留账本用途的 session_factory。
 引用不进入模型输入、State、checkpoint 或业务摘要，生命周期由应用管理。
-详见 [通用任务执行边界](workflow-generic-task-execution.md#10-知识客户端依赖下沉)。
+详见 通用任务执行边界。
 
 ### Workflow 执行模块职责收敛
 
-正式持久化执行入口命名为 `runner.InvestigationRunner`；图内计划准备在 `planning.py`，阶段入账协议在 `phase_execution.py`，运行占用和 generation 在 `run_guard.py`，检查点对账在 `checkpoints.py`。唯一 topology 仍在 `graph.py`，唯一业务阶段实现在 `nodes.py`。旧 `recovery.FirstRoundRecovery` 仅兼容导出同一个类。此次不改变数据库 schema、稳定身份、摘要或事务边界。详见 [执行模块指南](workflow-execution-module-guide.md)。
+正式持久化执行入口命名为 `runner.InvestigationRunner`；图内计划准备在 `planning.py`，阶段入账协议在 `phase_execution.py`，运行占用和 generation 在 `run_guard.py`，检查点对账在 `checkpoints.py`。唯一 topology 仍在 `graph.py`，唯一业务阶段实现在 `nodes.py`。旧 `recovery.FirstRoundRecovery` 仅兼容导出同一个类。此次不改变数据库 schema、稳定身份、摘要或事务边界。详见 执行模块指南。
 
 可信运行环境进一步统一为 `InvestigationInvocation.runtime`：`RunExecutionContext` 不再持有 context，规划、阶段事务与检查点校验显式接收 runtime；内部执行控制只保存规格、策略和 guard，包装层核对案件、轮次及运行身份。数据库与检查点协议不变。
 
@@ -1054,7 +1054,7 @@ graph 和 FirstRoundRecovery 只保留账本用途的 session_factory。
 
 ### 运行身份与阶段协议最终分离
 
-当前 `RunExecutionContext` 只包含 `identity / policy / guard`，旧 RunSpec 已移除。阶段模型与协议在对应 Operation 登记；已选历史按原协议复用，未登记的后续阶段可使用新配置，已开始且未提交的阶段不允许静默换协议。0008 迁移支持纯身份运行记录和独立规划输入 v2，v1 历史只读投影、原文与摘要不覆盖。以 [执行模块指南](workflow-execution-module-guide.md) 为当前边界说明。
+当前 `RunExecutionContext` 只包含 `identity / policy / guard`，旧 RunSpec 已移除。阶段模型与协议在对应 Operation 登记；已选历史按原协议复用，未登记的后续阶段可使用新配置，已开始且未提交的阶段不允许静默换协议。0008 迁移支持纯身份运行记录和独立规划输入 v2，v1 历史只读投影、原文与摘要不覆盖。以 执行模块指南 为当前边界说明。
 
 ### 旧运行与规划契约移除
 

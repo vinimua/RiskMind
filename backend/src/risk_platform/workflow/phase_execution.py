@@ -1,10 +1,12 @@
 """阶段持久化适配：构造操作输入、选择正式结果，并执行三段事务协议。"""
 
 import hashlib
+import json
+import logging
 from datetime import datetime, timezone
-from risk_platform.agents.prompts import TOOL_SELECTION_SYSTEM_PROMPT, KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT
+from risk_platform.agents.prompts import TOOL_SELECTION_SYSTEM_PROMPT, OBSERVATION_SYSTEM_PROMPT
 from risk_platform.memory.repository import capture_observation, context_for_stage
-from risk_platform.execution.tools import query_contract_digest
+from risk_platform.execution.tools import query_contract_digest, available_tools, tool_definition, validate_tool_call, ToolCall
 from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
@@ -12,21 +14,44 @@ from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToo
 from risk_platform.workflow import access, nodes
 from risk_platform.workflow.runtime import InvestigationAction, check_runtime
 from risk_platform.workflow.persistence import repository as ledger
-from risk_platform.workflow.persistence.business_inputs import BusinessOperationInput
+from risk_platform.workflow.persistence.business_inputs import BusinessOperationInput, ToolOperationInput
 from risk_platform.workflow.persistence.contracts import OperationType, operation_key
 from risk_platform.workflow.persistence.models import ResultRow, OperationRow
 from risk_platform.workflow.persistence.business_inputs import business_projection
-from risk_platform.workflow.persistence.recovery_contracts import PhaseArtifact
+from risk_platform.workflow.persistence.recovery_contracts import PhaseArtifact, ToolArtifact, RegisteredCall
 from risk_platform.workflow.persistence.recovery_models import InvestigationRunAttemptRow, InvestigationRunSelectionRow
 from risk_platform.workflow.access import authorize_run
 from risk_platform.workflow.run_guard import RecoveryBlockedError
 from risk_platform.workflow.knowledge_tool import knowledge_execution
+from risk_platform.workflow.observation import TOOL_OBSERVATION_TOKENS, TOOL_CONTEXT_TOKENS
+from risk_platform.core.token_budget import TOKENIZER_SHA256
+
+logger = logging.getLogger(__name__)
 
 
-def _operation(invocation, kind, *, runtime, agent, task_id=None, candidate=None, results=()):
+def _operation(invocation, kind, *, runtime, agent, task_id=None, candidate=None, results=(), tool_name=None, capability=None,
+               legacy=False):
     identity = invocation.identity
     data = dict(investigation_id=identity.investigation_id, round_id=identity.round_id, plan_id=identity.plan_id,
                 task_id=task_id, operation_type=kind)
+    definitions = available_tools(capability, runtime) if capability is not None else ()
+    generic = not legacy
+    if generic:
+        if kind == OperationType.TOOL_EXECUTION:
+            definition = tool_definition(tool_name)
+            data.update(tool_name=tool_name, capability=definition.capability.value,
+                        candidate_request=candidate.model_dump(mode="json") if isinstance(candidate, BaseModel) else candidate,
+                        tool_limits={tool_name: definition.execution_limits(runtime)})
+        elif kind == OperationType.QUERY_FORMULATION:
+            data.update(capability=capability.value, model_name=agent.model,
+                        prompt_version=query_contract_digest(TOOL_SELECTION_SYSTEM_PROMPT, capability=capability,
+                                                            names=tuple(d.name for d in definitions)),
+                        tool_limits={d.name: d.execution_limits(runtime) for d in definitions})
+        else:
+            data.update(model_name=agent.model, prompt_version=hashlib.sha256(
+                (OBSERVATION_SYSTEM_PROMPT + TOKENIZER_SHA256).encode()).hexdigest(),
+                execution_refs=tuple(r.execution_id for r in results))
+        return ToolOperationInput(**data)
     if kind == OperationType.QUERY_FORMULATION:
         tool = knowledge_execution(runtime, InvestigationAction.CONTINUE)
         data.update(model_name=agent.model, prompt_version=query_contract_digest(TOOL_SELECTION_SYSTEM_PROMPT), max_top_k=tool.max_top_k)
@@ -34,7 +59,11 @@ def _operation(invocation, kind, *, runtime, agent, task_id=None, candidate=None
         tool = knowledge_execution(runtime, InvestigationAction.CONTINUE)
         data.update(candidate_request=candidate, scope=tool.scope, index_profile=tool.index_profile)
     else:
-        data.update(model_name=agent.model, prompt_version=hashlib.sha256(KNOWLEDGE_OBSERVATION_SYSTEM_PROMPT.encode()).hexdigest(),
+        # 结果投影规则也是实际模型输入协议的一部分，不能变更后复用旧摘要。
+        protocol = json.dumps(dict(prompt=OBSERVATION_SYSTEM_PROMPT, projection="whole-context/v1",
+                                   tokenizer_sha256=TOKENIZER_SHA256,
+                                   tool_tokens=TOOL_OBSERVATION_TOKENS, context_tokens=TOOL_CONTEXT_TOKENS), sort_keys=True)
+        data.update(model_name=agent.model, prompt_version=hashlib.sha256(protocol.encode()).hexdigest(),
                     execution_refs=tuple(result.execution_id for result in results))
     return BusinessOperationInput(**data)
 
@@ -158,10 +187,29 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
 
 def ledger_phase_executor(sessions, invocation, *, runtime, agent):
     """把统一节点的业务产物适配到既有账本协议；首次运行和恢复不分支。"""
-    async def execute(kind, produce, *, task_id=None, candidate=None, results=(), tool_name=None):
-        if tool_name is not None and tool_name != "knowledge_search":
+    async def execute(kind, produce, *, task_id=None, candidate=None, results=(), tool_name=None, capability=None):
+        # 只有已有 v2 阶段继续使用旧协议；新阶段统一采用通用工具协议。
+        recorded = None
+        if kind != OperationType.KNOWLEDGE_EXECUTION:
+            async with sessions() as session:
+                recorded = await session.scalar(select(OperationRow).where(
+                    OperationRow.plan_id == invocation.identity.plan_id,
+                    OperationRow.task_id == task_id,
+                    OperationRow.operation_type.in_((kind.value, OperationType.KNOWLEDGE_EXECUTION.value)
+                        if kind == OperationType.TOOL_EXECUTION else (kind.value,)),
+                ))
+        legacy = kind == OperationType.KNOWLEDGE_EXECUTION or (recorded is not None and recorded.schema_version < 3)
+        if legacy and kind == OperationType.TOOL_EXECUTION:
+            kind = OperationType.KNOWLEDGE_EXECUTION
+        if kind == OperationType.KNOWLEDGE_EXECUTION and capability is not None and {
+            d.name for d in available_tools(capability, runtime)
+        } != {"knowledge_search"}:
+            kind = OperationType.TOOL_EXECUTION
+        if kind == OperationType.KNOWLEDGE_EXECUTION and tool_name is not None and tool_name != "knowledge_search":
             raise ledger.LedgerIntegrityError("当前账本版本尚未支持所选工具，不能写入知识执行载荷")
-        value = _operation(invocation, kind, runtime=runtime, agent=agent, task_id=task_id, candidate=candidate, results=results)
+        value = _operation(invocation, kind, runtime=runtime, agent=agent, task_id=task_id, candidate=candidate,
+                           results=results, tool_name=tool_name, capability=capability, legacy=legacy)
+        artifact_type = ToolArtifact if isinstance(value, ToolOperationInput) else PhaseArtifact
         async def persistable():
             # 每个阶段调用前重新检查可信上下文；_phase 另有 PG 归属鉴权与 fencing。
             check_runtime(runtime, InvestigationAction.CONTINUE)
@@ -173,7 +221,11 @@ def ledger_phase_executor(sessions, invocation, *, runtime, agent):
                         run_id=invocation.identity.run_id, stage="QUERY:" + hashlib.sha256(task_id.encode()).hexdigest())
                 outcome = await produce(memory_context=memory_context) if memory_context.memories else await produce()
                 if outcome.failure is not None:
-                    return PhaseArtifact(execution=outcome.failure)
+                    return artifact_type(execution=outcome.failure)
+                if isinstance(value, ToolOperationInput):
+                    selected = validate_tool_call(ToolCall(outcome.tool_name, outcome.candidate), capability, runtime)
+                    return ToolArtifact(query_request=RegisteredCall(tool_name=selected.tool_name,
+                                        arguments=selected.arguments.model_dump(mode="json")))
                 try:
                     if outcome.tool_name != "knowledge_search":
                         raise ValueError("当前账本版本尚未支持该工具选择")
@@ -189,10 +241,28 @@ def ledger_phase_executor(sessions, invocation, *, runtime, agent):
                         started_at=started, completed_at=now, error=error))
                 return PhaseArtifact(query_request=request)
             result = await produce()
-            return PhaseArtifact(execution=result) if kind == OperationType.KNOWLEDGE_EXECUTION else PhaseArtifact(observation=result)
+            if isinstance(value, ToolOperationInput) and kind == OperationType.TOOL_EXECUTION and result.tool_name is None:
+                # 现有知识适配器仍输出历史载荷；通用阶段明确记录实际选择的工具身份。
+                result = TaskExecutionResult.model_validate(result.model_dump() | {
+                    "tool_name": value.tool_name, "result_version": tool_definition(value.tool_name).result_version})
+            return artifact_type(execution=result) if kind in (OperationType.KNOWLEDGE_EXECUTION, OperationType.TOOL_EXECUTION) else artifact_type(observation=result)
         artifact = await _phase(sessions, invocation, value, persistable, runtime=runtime)
+        if kind in (OperationType.KNOWLEDGE_EXECUTION, OperationType.TOOL_EXECUTION):
+            # _phase 返回时结果已提交或已从账本复用；不把模型建议或未提交结果记成完成。
+            # 不记录 query、正文、原始错误或凭证；详细参数可沿 operation_key 回查账本。
+            result = artifact.execution
+            logger.info("tool_result", extra={
+                "operation_key": operation_key(value), "tool_name": value.tool_name,
+                "execution_id": result.execution_id, "task_id": result.task_id,
+                "execution_status": result.status.value,
+                "error_code": result.error.code if result.error else None,
+                "retryable": result.error.retryable if result.error else False,
+            })
         if kind == OperationType.QUERY_FORMULATION:
+            if isinstance(artifact, ToolArtifact) and artifact.query_request is not None:
+                return nodes.QueryOutcome(candidate=artifact.query_request.arguments,
+                                          tool_name=artifact.query_request.tool_name)
             return nodes.QueryOutcome(candidate=artifact.query_request, tool_name=value.tool_name if artifact.query_request is not None else None,
                                       failure=artifact.execution)
-        return artifact.execution if kind == OperationType.KNOWLEDGE_EXECUTION else artifact.observation
+        return artifact.execution if kind in (OperationType.KNOWLEDGE_EXECUTION, OperationType.TOOL_EXECUTION) else artifact.observation
     return execute

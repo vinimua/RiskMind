@@ -101,7 +101,8 @@ async def _planning_candidate(sessions, invocation, agent, *, runtime):
     spec = planning_specification(invocation, runtime, agent)
     source = runtime.investigation.planning_input
     claim_id = "planning-claim-" + invocation.guard.owner_id
-    if "KNOWLEDGE_RETRIEVAL" not in source.available_capabilities:
+    from risk_platform.execution.tools import TOOL_DEFINITIONS
+    if not set(source.available_capabilities) & {d.capability for d in TOOL_DEFINITIONS.values()}:
         raise PlanningPreparationError("当前调查没有可用的知识检索能力，未调用规划模型")
     # 事务 1：优先复用已提交候选，或结算已经退出的旧 claim 留下的 STARTED。
     async with sessions.begin() as session:

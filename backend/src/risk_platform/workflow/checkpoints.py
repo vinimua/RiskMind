@@ -117,7 +117,7 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
             if (value.investigation_id, value.round_id, value.plan_id, value.task_id, value.operation_type) != (
                     identity.investigation_id, identity.round_id, identity.plan_id, task_id, kind):
                 raise ledger.LedgerIntegrityError("阶段记录身份与 checkpoint 不一致")
-            if kind == OperationType.KNOWLEDGE_EXECUTION and value.candidate_request != candidate:
+            if kind in (OperationType.KNOWLEDGE_EXECUTION, OperationType.TOOL_EXECUTION) and value.candidate_request != candidate:
                 raise ledger.LedgerIntegrityError("历史工具执行与已选查询不一致")
             if kind == OperationType.OBSERVATION and value.execution_refs != tuple(r.execution_id for r in results):
                 raise ledger.LedgerIntegrityError("历史解释与执行引用不一致")
@@ -127,8 +127,11 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
             formed = await selected(OperationType.QUERY_FORMULATION, task_id=task.task_id)
             authoritative = formed.execution
             if authoritative is None:
-                authoritative = (await selected(OperationType.KNOWLEDGE_EXECUTION,
-                    task_id=task.task_id, candidate=formed.query_request)).execution
+                from risk_platform.workflow.persistence.recovery_contracts import RegisteredCall
+                call = formed.query_request
+                kind = OperationType.TOOL_EXECUTION if isinstance(call, RegisteredCall) else OperationType.KNOWLEDGE_EXECUTION
+                authoritative = (await selected(kind, task_id=task.task_id,
+                    candidate=call.arguments if isinstance(call, RegisteredCall) else call)).execution
             if authoritative != result:
                 raise ledger.LedgerIntegrityError("checkpoint 执行事实与不可变账本不一致")
             task.status = TaskStatus.COMPLETED if result.status == "SUCCEEDED" else TaskStatus.FAILED

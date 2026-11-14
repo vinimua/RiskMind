@@ -1,21 +1,40 @@
-"""调用前的近似 token 检查；不是供应商 tokenizer 或计费结果。"""
+"""DeepSeek 本地文本分词与预算检查；服务端完整请求用量仍以 usage 为准。"""
 
 import json
-import re
+import hashlib
+from functools import cache
+from pathlib import Path
+
+from tokenizers import Tokenizer
+
+# 用户提供的 deepseek_v4_tokenizer.zip 中 tokenizer.json 的 SHA-256。
+# 文件随 Python 包发布，不依赖 Downloads 路径、网络或运行时远程代码。
+TOKENIZER_SHA256 = "89085f12ef79460ac5f66d1119325ddfc694b4ab209d80bbd81d35f081dc9614"
+
+
+@cache
+def _tokenizer() -> Tokenizer:
+    data = Path(__file__).with_name("deepseek_v4_tokenizer.json").read_bytes()
+    if hashlib.sha256(data).hexdigest() != TOKENIZER_SHA256:
+        raise RuntimeError("离线 tokenizer 文件与固定版本不一致")
+    tokenizer = Tokenizer.from_str(data.decode("utf-8"))
+    tokenizer.no_truncation()
+    tokenizer.no_padding()
+    return tokenizer
+
+
+class ContextBudgetExceeded(ValueError):
+    """必要输入无法放入预算；调用方应明确反馈，不能当作零命中。"""
 
 
 def estimate_tokens(text: str) -> int:
-    """参考 DevF：汉字及符号逐个计数，ASCII 单词按约四字符一 token。
+    """保留现有预算调用入口，用本地分词替代字符规则。
 
-    非 ASCII 字符也计入，避免中文以外的文本被正则漏掉。误差由调用方
-    配置的安全余量缓冲；最终真实用量仍以供应商 usage 为准。
-     """
-# 它实际采用两套规则：
-# - 英文字母、数字等连续字符串：大约每 4 个字符算 1 个 Token。
-# - 中文、标点、其他 Unicode 字符：每个字符算 1 个 Token。
-    parts = re.findall(r"[A-Za-z0-9_-]+|[^\s]", text)
-    return sum(max(1, (len(part) + 3) // 4) if part.isascii() and
-               re.fullmatch(r"[A-Za-z0-9_-]+", part) else 1 for part in parts)
+    只数传入文本，不额外添加 BOS/EOS。消息模板、工具协议和服务端模型
+    版本可能带来差异，因此不把序列化 JSON 的计数称为 API 精确计费用量。
+    缺失或损坏时明确失败，不静默回退旧算法。
+    """
+    return len(_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
 def check_request_budget(messages, *, input_limit: int, context_window: int,

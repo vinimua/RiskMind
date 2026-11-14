@@ -109,8 +109,10 @@ async def _claim(engine, sessions, identity, context, policy, *, allow_planning=
 async def _bind_execution_run(session, identity, plan_row, trusted, policy):
     """AcceptedPlan 已存在后，原有正式 Run/Claim 才能建立；调用方负责提交。"""
     plan = ledger._read(plan_row, AcceptedPlan)
-    if any(task.capability != "KNOWLEDGE_RETRIEVAL" for task in plan.plan.tasks):
-        raise ledger.LedgerIntegrityError("首轮恢复仅支持正式知识任务")
+    from risk_platform.execution.tools import TOOL_DEFINITIONS
+    supported = {definition.capability for definition in TOOL_DEFINITIONS.values()}
+    if any(task.capability not in supported for task in plan.plan.tasks):
+        raise ledger.LedgerIntegrityError("计划包含未注册能力")
     row = await session.get(InvestigationRunRow, identity.run_id)
     if row is None:
         row, _ = await ledger._insert(session, InvestigationRunRow, identity.run_id, identity, run_id=identity.run_id,

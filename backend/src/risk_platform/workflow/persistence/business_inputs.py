@@ -47,7 +47,41 @@ class BusinessOperationInput(BaseModel):
         return self
 
 
+class ToolOperationInput(BaseModel):
+    """v3 通用工具阶段；权限快照由注册工具提供公开、可审计字段。"""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[3] = 3
+    investigation_id: Identity
+    round_id: Identity
+    plan_id: Identity
+    task_id: Identity | None = None
+    operation_type: OperationType
+    capability: str | None = None
+    tool_name: Identity | None = None
+    candidate_request: dict | None = None
+    tool_limits: dict = Field(default_factory=dict)
+    model_name: Identity | None = None
+    prompt_version: Identity | None = None
+    execution_refs: tuple[Identity, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_stage(self):
+        if self.operation_type == OperationType.OBSERVATION:
+            if self.task_id is not None or not self.execution_refs or len(set(self.execution_refs)) != len(self.execution_refs):
+                raise ValueError("解释阶段必须关联完整且唯一的执行集合")
+        elif self.task_id is None or self.capability is None or self.execution_refs:
+            raise ValueError("任务阶段必须关联正式任务及能力")
+        if self.operation_type == OperationType.TOOL_EXECUTION:
+            if self.tool_name is None or self.candidate_request is None or self.model_name is not None or self.prompt_version is not None:
+                raise ValueError("工具执行必须保存工具、请求与工具限制")
+        elif self.model_name is None or self.prompt_version is None or self.candidate_request is not None:
+            raise ValueError("模型阶段必须记录模型协议")
+        return self
+
+
 def business_projection(value: OperationInput | BusinessOperationInput) -> BusinessOperationInput:
+    if isinstance(value, ToolOperationInput):
+        return ToolOperationInput.model_validate_json(value.model_dump_json())
     if isinstance(value, BusinessOperationInput):
         return BusinessOperationInput.model_validate_json(value.model_dump_json())
     value = OperationInput.model_validate_json(value.model_dump_json())
@@ -73,3 +107,13 @@ class AttemptAttribution(BaseModel):
         if self.actor_id != self.execution_context.actor_id:
             raise ValueError("尝试发起人与本次可信执行身份不一致")
         return self
+
+
+class ToolAttemptAttribution(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[2] = 2
+    investigation_id: Identity
+    round_id: Identity
+    actor_id: Identity
+    action: Literal["investigation:continue"] = "investigation:continue"
+    tool_limits: dict = Field(default_factory=dict)

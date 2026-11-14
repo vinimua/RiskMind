@@ -13,6 +13,7 @@ dependencies = [
   "openai",
   "uvicorn[standard]",
   "pydantic-settings",
+  "tokenizers==0.22.2",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +27,9 @@ recovery = ["langgraph-checkpoint-postgres>=2.0.25,<4", "psycopg[binary]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"risk_platform.core" = ["deepseek_v4_tokenizer.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,7 +24,7 @@ from risk_platform.workflow import nodes
 from risk_platform.workflow.contracts import CapabilityType, InitialPlanningInput, InvestigationPlan, InvestigationTask, TaskStatus, UserQuery
 from test_runtime import make_runtime
 from risk_platform.workflow.observation import (
-    KnowledgeObservationDraft, ObservationIntegrityError, validate_round_inputs,
+    ObservationDraft, ObservationIntegrityError, validate_round_inputs,
 )
 
 
@@ -71,10 +71,10 @@ def draft(results):
 
 def run(results, data=None, failure=None):
     class Agent:
-        def observe_knowledge_round(self, *_, **__):
+        def observe_round(self, *_, **__):
             if failure:
                 raise failure
-            return KnowledgeObservationDraft.model_validate(data if data is not None else draft(results))
+            return ObservationDraft.model_validate(data if data is not None else draft(results))
     return asyncio.run(nodes.observation(current(results), investigation_agent=Agent(), runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(
         actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))['observation']
 
@@ -91,16 +91,6 @@ def test_mixed_results_keep_failure_facts_and_traceable_historical_finding():
     assert observed.observation_id.startswith("obs-") and observed.created_at.tzinfo
 
 
-def test_planning_history_keeps_no_hits_failures_and_snapshot_separate():
-    from risk_platform.workflow.observation import summarize_previous_tasks
-    results = [execution(empty=True), execution(1, "FAILED"), execution(2, "REJECTED")]
-    values = summarize_previous_tasks(current(results)["investigation_plan"], results)
-    assert [v["outcome"] for v in values] == ["NO_HITS", "EXECUTION_FAILED", "EXECUTION_REJECTED"]
-    assert values[0]["request"]["query"] and values[0]["snapshot"]["route_version"] == 1
-    assert values[1]["error"]["code"] == "DEPENDENCY_FAILURE"
-    assert values[2]["request"] is None  # 未执行，不能伪造成功请求或数据快照。
-
-
 def test_old_observation_is_read_only_without_invented_action():
     from risk_platform.workflow.observation import read_observation, LegacyRoundObservation
     value = {
@@ -115,6 +105,48 @@ def test_old_observation_is_read_only_without_invented_action():
     assert isinstance(observed, LegacyRoundObservation)
     assert not hasattr(observed, "action")
     assert observed.model_dump(mode="json")["narrative"] == value["narrative"]
+
+
+def test_tool_projection_preserves_states_and_sources_without_mutating_results():
+    import json
+    from risk_platform.core.token_budget import estimate_tokens
+    from risk_platform.workflow.observation import project_tool_results
+    results = [execution(), execution(1, empty=True), execution(2, "FAILED"), execution(3, "REJECTED")]
+    before = [r.model_dump_json() for r in results]
+    projected = project_tool_results(results, max_tokens=4000)
+    assert [item["outcome"] for item in projected] == [
+        "KNOWLEDGE_AVAILABLE", "NO_HITS", "EXECUTION_FAILED", "EXECUTION_REJECTED"]
+    assert projected[0]["items"][0]["content"] == results[0].payload.resolved.contexts[0].content
+    assert projected[0]["items"][0]["sources"][0] == results[0].payload.resolved.contexts[0].supporting_hits[0].source.model_dump(mode="json")
+    assert projected[0]["tool_name"] == "knowledge_search"
+    assert projected[2]["error"]["retryable"] is False
+    assert estimate_tokens(json.dumps(projected, ensure_ascii=False, separators=(",", ":"))) <= 4000
+    assert [r.model_dump_json() for r in results] == before
+
+
+def test_tool_projection_omits_whole_context_instead_of_changing_meaning():
+    from risk_platform.workflow.observation import project_tool_results
+    result = execution()
+    projected = project_tool_results([result], context_tokens=1)
+    assert projected[0]["items"] == []
+    assert projected[0]["omitted_items"] == 1
+    assert projected[0]["outcome"] == "KNOWLEDGE_AVAILABLE"  # 省略不是零命中。
+    assert result.payload.resolved.contexts  # 完整材料仍在权威结果中。
+
+
+def test_projection_cannot_drop_failed_execution_to_meet_budget():
+    from risk_platform.core.token_budget import ContextBudgetExceeded
+    from risk_platform.workflow.observation import project_tool_results
+    with pytest.raises(ContextBudgetExceeded):
+        project_tool_results([execution(), execution(1, "FAILED")], max_tokens=1)
+
+
+def test_observation_input_budget_failure_is_visible_as_inconclusive():
+    from risk_platform.core.token_budget import ContextBudgetExceeded
+    observed = run([execution()], failure=ContextBudgetExceeded("internal details"))
+    assert observed.status == "INCONCLUSIVE"
+    assert observed.error.code == "OBSERVATION_INPUT_BUDGET_EXCEEDED"
+    assert "internal details" not in observed.model_dump_json()
 
 
 @pytest.mark.parametrize("status,empty,outcome", [("SUCCEEDED", True, "NO_HITS"),
@@ -195,9 +227,9 @@ def test_actual_deadline_without_partial_output():
     import time
     results = [execution()]
     class Slow:
-        def observe_knowledge_round(self, *_, **__):
+        def observe_round(self, *_, **__):
             time.sleep(.04)
-            return KnowledgeObservationDraft.model_validate(draft(results))
+            return ObservationDraft.model_validate(draft(results))
     ctx = KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD, timeout_seconds=.001)
     result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), runtime_context=runtime_for((current(results))["planning_input"], ctx), execute_phase=run_phase))
     assert result["observation"].error.code == "OBSERVATION_TIMEOUT"
@@ -217,10 +249,10 @@ def test_business_observation_does_not_close_case_or_change_execution_results(mo
             return pending
         def formulate_tool_call(self, *_, **__):
             return tool_call({"query": "具体问题", "top_k": 1})
-        def observe_knowledge_round(self, *_, **__):
+        def observe_round(self, *_, **__):
             if bad_model:
                 raise ValueError("private")
-            return KnowledgeObservationDraft.model_validate(draft(results))
+            return ObservationDraft.model_validate(draft(results))
     output = asyncio.run(run_business_nodes(Agent(), state["planning_input"], make_runtime(
         state["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD),
         allow_unscoped=True)))
@@ -252,11 +284,11 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
     results = [execution()]
     original_text = results[0].payload.resolved.contexts[0].content
     class MutatingAgent:
-        def observe_knowledge_round(self, plan, supplied, **options):
+        def observe_round(self, plan, supplied, **options):
             # 模拟调用方代码误改模型嵌套对象；系统校验仍须对照原输入，而非此副本。
             supplied[0].payload.resolved.contexts[0].supporting_hits[0].source.document_version = "forged"
             data = draft(supplied)
-            return KnowledgeObservationDraft.model_validate(data)
+            return ObservationDraft.model_validate(data)
     output = asyncio.run(nodes.observation(current(results), investigation_agent=MutatingAgent(),
         runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))
     assert output["observation"].error.code == "OBSERVATION_INVALID"
