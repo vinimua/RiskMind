@@ -1,4 +1,4 @@
-"""首轮调查共享状态：规划输入、正式任务、执行事实及轮次结束标记。"""
+"""调查共享状态：当前轮正式任务与结果；历史事实从不可变账本读取。"""
 
 from typing import Literal, NotRequired, TypedDict
 
@@ -30,3 +30,4 @@ class InvestigationState(TypedDict):
     checkpoint_schema_version: NotRequired[int]
     run_id: NotRequired[str]
     plan_id: NotRequired[str]
+    stop_reason: NotRequired[str | None]

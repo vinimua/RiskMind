@@ -5,6 +5,7 @@ from dataclasses import replace
 from types import MappingProxyType
 
 import pytest
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from risk_platform.execution import knowledge, tools
 from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
@@ -17,7 +18,10 @@ from test_observation import execution
 def test_tool_definition_has_no_workflow_phase_or_ambiguous_callbacks():
     from dataclasses import fields
     names = {field.name for field in fields(tools.ToolDefinition)}
-    assert not {"execution_phase", "model_input", "validate_execution"} & names
+    assert not {"execution_phase", "model_input", "validate_execution", "handler", "request_model", "name", "description"} & names
+    from langchain_core.tools import StructuredTool
+    assert isinstance(tools.KNOWLEDGE_SEARCH.tool, StructuredTool)
+    assert not hasattr(tools, "execute_registered_tool")
     assert {"execution_limits", "validate_result", "authorize_result"} <= names
 
 
@@ -41,34 +45,45 @@ def test_tool_definition_rejects_result_instance_instead_of_model_class():
 
 
 def test_registered_schema_has_no_identity_and_cannot_be_mutated_by_caller():
-    declarations = tools.tool_declarations(CapabilityType.KNOWLEDGE_RETRIEVAL)
+    declarations = [convert_to_openai_tool(tools.KNOWLEDGE_SEARCH.tool)]
     assert declarations[0]["function"]["name"] == KnowledgeSearchTool.name
     schema = declarations[0]["function"]["parameters"]
     assert set(schema["properties"]) == {"query", "top_k", "filters"}
-    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"query", "top_k"}
+    assert tools.KNOWLEDGE_SEARCH.tool.args_schema.model_config["extra"] == "forbid"
     declarations[0]["function"]["name"] = "forged"
-    assert tools.tool_declarations(CapabilityType.KNOWLEDGE_RETRIEVAL)[0]["function"]["name"] == "knowledge_search"
+    assert convert_to_openai_tool(tools.KNOWLEDGE_SEARCH.tool)["function"]["name"] == "knowledge_search"
     with pytest.raises(TypeError):
         tools.TOOL_DEFINITIONS["forged"] = tools.KNOWLEDGE_SEARCH
 
 
+def test_csv_declaration_only_exposes_its_own_request_fields():
+    schema = convert_to_openai_tool(tools.CSV_SAMPLE_STATISTICS.tool)["function"]["parameters"]
+    assert set(schema["properties"]) == {"dataset_id", "statistic", "window_start", "window_end", "field"}
+    assert set(schema["required"]) == {"dataset_id", "statistic", "window_start", "window_end"}
+    assert schema["properties"]["statistic"]["enum"] == ["SAMPLE_COUNT", "BAD_LABEL_RATE", "MISSING_RATE"]
+    assert schema["properties"]["window_start"]["format"] == "date-time"
+    assert tools.CSV_SAMPLE_STATISTICS.tool.args_schema.model_config["extra"] == "forbid"
+
+
 def test_no_declaration_for_unimplemented_capability():
-    with pytest.raises(ValueError):
-        tools.tool_declarations(CapabilityType.COMPUTATION)
+    with pytest.raises(tools.ToolUnavailableError) as failure:
+        tools.available_tools(CapabilityType.FACT_RETRIEVAL, runtime_for(state()["planning_input"], context()))
+    assert failure.value.code == "UNSUPPORTED_CAPABILITY"
 
 
 @pytest.mark.parametrize("name,capability,code", [
     ("shell_execute", "KNOWLEDGE_RETRIEVAL", "UNKNOWN_TOOL"),
     ("knowledge_search", "COMPUTATION", "UNSUPPORTED_CAPABILITY"),
 ])
-def test_unregistered_or_mismatched_tool_never_calls_handler(monkeypatch, name, capability, code):
+def test_unregistered_or_mismatched_tool_never_executes(monkeypatch, name, capability, code):
     async def forbidden(*_, **__):
         pytest.fail("未知或错能力工具不能进入 handler")
     monkeypatch.setattr(knowledge, "execute_knowledge_search", forbidden)
     task = state(1)["investigation_plan"].tasks[0].model_copy(update={"capability": CapabilityType(capability)})
-    result = asyncio.run(tools.execute_registered_tool(name, task, {"query": "q", "top_k": 1},
-        runtime_context=runtime_for(state()["planning_input"], context())))
-    assert result.status == "REJECTED" and result.error.code == code and result.payload is None
+    with pytest.raises((ValueError, tools.ToolUnavailableError)):
+        tools.validate_tool_call(tools.ToolCall(name, {"query": "q", "top_k": 1}), task.capability,
+            runtime_for(state()["planning_input"], context()))
 
 
 def test_registered_dispatch_delegates_to_existing_adapter(monkeypatch):
@@ -78,9 +93,10 @@ def test_registered_dispatch_delegates_to_existing_adapter(monkeypatch):
         return expected
     monkeypatch.setattr(knowledge, "execute_knowledge_search", adapter)
     task, request, trusted = state(1)["investigation_plan"].tasks[0], {"query": "q", "top_k": 1}, context()
-    result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, request,
-        runtime_context=runtime_for(state()["planning_input"], trusted)))
-    assert result == expected and len(seen) == 1
+    result = asyncio.run(tools.KNOWLEDGE_SEARCH.tool.ainvoke(request,
+        config={"configurable": {"task": task, "runtime": runtime_for(state()["planning_input"], trusted)}}))
+    assert result == expected.model_copy(update={"tool_name": "knowledge_search", "result_version": "1"})
+    assert len(seen) == 1
     assert seen[0][0] == task and seen[0][1].query == request["query"]
     assert seen[0][2]["context"] == trusted
     assert seen[0][2]["authorize"](trusted.actor_id, "knowledge:search", trusted) is True
@@ -90,15 +106,16 @@ def test_registration_does_not_bypass_authorization(monkeypatch):
     async def forbidden(*_, **__):
         pytest.fail("权限拒绝不能检索")
     monkeypatch.setattr(knowledge, "retrieve_dense_children", forbidden)
-    result = asyncio.run(tools.execute_registered_tool("knowledge_search", state(1)["investigation_plan"].tasks[0],
-        {"query": "q", "top_k": 1}, runtime_context=runtime_for(state()["planning_input"], context(), authorize=lambda *_: False)))
+    result = asyncio.run(tools.KNOWLEDGE_SEARCH.tool.ainvoke({"query": "q", "top_k": 1},
+        config={"configurable": {"task": state(1)["investigation_plan"].tasks[0],
+            "runtime": runtime_for(state()["planning_input"], context(), authorize=lambda *_: False)}}))
     assert result.status == "REJECTED" and result.error.code == "TOOL_NOT_AUTHORIZED"
 
 
 def test_contract_digest_includes_tool_schema_and_description(monkeypatch):
     original = tools.query_contract_digest("prompt")
-    modified = replace(tools.KNOWLEDGE_SEARCH, description="不同工具说明")
-    monkeypatch.setattr(tools, "TOOL_DEFINITIONS", MappingProxyType({modified.name: modified}))
+    modified = replace(tools.KNOWLEDGE_SEARCH, tool=tools.KNOWLEDGE_SEARCH.tool.model_copy(update={"description": "不同工具说明"}))
+    monkeypatch.setattr(tools, "TOOL_DEFINITIONS", MappingProxyType({modified.tool.name: modified}))
     assert tools.query_contract_digest("prompt") != original
 
 
@@ -118,28 +135,26 @@ def test_knowledge_dependencies_are_resolved_from_current_binding(monkeypatch, a
         assert options["milvus_client"] is milvus
         return execution(empty=True)
     monkeypatch.setattr(knowledge, "execute_knowledge_search", adapter)
-    result = asyncio.run(tools.execute_registered_tool("knowledge_search", task, {"query": "q", "top_k": 1}, runtime_context=runtime))
+    result = asyncio.run(tools.KNOWLEDGE_SEARCH.tool.ainvoke({"query": "q", "top_k": 1},
+        config={"configurable": {"task": task, "runtime": runtime}}))
     assert result.status == "SUCCEEDED"
     # 不可序列化的客户端不能混入模型声明或已有审计上下文。
     import json
-    json.dumps(tools.tool_declarations(task.capability))
+    json.dumps(convert_to_openai_tool(tools.KNOWLEDGE_SEARCH.tool))
     json.dumps(binding.execution.model_dump(mode="json"))
     assert "embedding_client=" not in repr(binding) and "session_factory=" not in repr(binding)
 
 def test_required_tool_mode_is_used_by_request_and_digest(monkeypatch):
-    from types import SimpleNamespace as NS
     from risk_platform.agents.investigation import InvestigationAgent
-    calls=[]
-    response=NS(choices=[NS(finish_reason="tool_calls",message=NS(content=None,tool_calls=[
-        NS(id="call-test",type="function",function=NS(name="knowledge_search",arguments='{"query":"history","top_k":1}'))]))])
-    def create(**kwargs): calls.append(kwargs);return response
-    agent=InvestigationAgent(NS(chat=NS(completions=NS(create=create))),"test-model")
+    from tool_model_helpers import ToolModelStub, tool_response
+    model = ToolModelStub(tool_response())
+    agent=InvestigationAgent(None,"test-model",tool_model=model)
     task=state(1)["investigation_plan"].tasks[0]
     call=agent.formulate_tool_call(task,state()["planning_input"],goal="test",
-        tools=tools.tool_declarations(task.capability),tool_limits={"knowledge_search":{"max_top_k":5}})
+        tools=[tools.KNOWLEDGE_SEARCH.tool],tool_limits={"knowledge_search":{"max_top_k":5}})
     assert call.tool_name=="knowledge_search"
-    assert calls[0]["tool_choice"]=="required" and calls[0]["parallel_tool_calls"] is False
-    assert calls[0]["extra_body"]=={"thinking":{"type":"disabled"}}
+    assert model.calls[0]["tool_choice"]=="required" and model.calls[0]["parallel_tool_calls"] is False
+    assert model.calls[0]["extra_body"]=={"thinking":{"type":"disabled"}}
     digest=tools.query_contract_digest("prompt")
     monkeypatch.setattr(tools,"required_tool_options",lambda:{"tool_choice":"required","parallel_tool_calls":False})
     assert tools.query_contract_digest("prompt")!=digest

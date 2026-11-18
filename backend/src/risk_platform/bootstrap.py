@@ -13,6 +13,7 @@ import json
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
+from risk_platform.execution.csv_statistics import CsvDataset, CsvStatisticsTool
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from sqlalchemy import text
@@ -57,11 +58,16 @@ class LocalSettings(BaseModel):
     knowledge_profile: IndexProfile
     timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     max_top_k: int = Field(default=5, gt=0, strict=True)
+    csv_datasets: tuple[CsvDataset, ...] = ()
 
     @model_validator(mode="after")
     def unique_models(self):
         if len(set(self.allowed_model_ids)) != len(self.allowed_model_ids):
             raise ValueError("allowed_model_ids contains duplicates")
+        if len({d.dataset_id for d in self.csv_datasets}) != len(self.csv_datasets):
+            raise ValueError("CSV dataset IDs must be unique")
+        if any(d.model_id not in self.allowed_model_ids for d in self.csv_datasets):
+            raise ValueError("CSV dataset model outside local grant")
         return self
 
     @classmethod
@@ -73,7 +79,8 @@ class LocalSettings(BaseModel):
         return cls(actor_id=required("RISK_LOCAL_ACTOR_ID"),
             api_token=required("RISK_LOCAL_API_TOKEN"),
             allowed_model_ids=json.loads(required("RISK_ALLOWED_MODEL_IDS")),
-            knowledge_profile=required("RISK_KNOWLEDGE_PROFILE"))
+            knowledge_profile=required("RISK_KNOWLEDGE_PROFILE"),
+            csv_datasets=json.loads(os.environ.get("RISK_CSV_DATASETS", "[]")))
 
     def authenticate(self, request):
         # 认证回答“是谁”：校验 Authorization: Bearer <token> 后返回配置中的身份。
@@ -118,7 +125,8 @@ async def local_services(settings):
     async with AsyncExitStack() as stack:
         chat, investigator = create_llm_agents()
         # 两个 Agent 共享模型客户端；同步 close 放在线程中执行，避免阻塞事件循环。
-        stack.push_async_callback(asyncio.to_thread, chat.client.close)
+        stack.push_async_callback(asyncio.to_thread, investigator.client.close)
+        stack.push_async_callback(investigator.tool_model.root_async_client.close)
         engine = create_async_engine(database_url, pool_pre_ping=True)
         stack.push_async_callback(engine.dispose)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -151,8 +159,12 @@ async def local_services(settings):
             execution = KnowledgeExecutionContext(actor_id=actor,
                 index_profile=settings.knowledge_profile, scope={"model_id": model_id},
                 max_top_k=settings.max_top_k, timeout_seconds=settings.timeout_seconds)
-            return (KnowledgeSearchTool(execution, settings.authorize_knowledge,
+            bound = (KnowledgeSearchTool(execution, settings.authorize_knowledge,
                 session_factory=sessions, embedding_client=embedder, milvus_client=milvus),)
+            datasets = tuple(d for d in settings.csv_datasets if d.model_id == model_id)
+            if datasets:
+                bound += (CsvStatisticsTool(actor_id=actor, model_id=model_id, datasets=datasets),)
+            return bound
 
         # yield 前完成资源准备，yield 期间由 HTTP 入口使用这些服务；退出后统一清理。
         yield EntryServices(sessions=sessions, runner=runner, chat_agent=chat,

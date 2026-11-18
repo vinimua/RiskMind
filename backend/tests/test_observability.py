@@ -59,11 +59,11 @@ def test_business_exception_preserved_without_exporting_raw_exception(monkeypatc
 
 def test_chat_model_instrumentation_only_exports_model_usage_and_intent(monkeypatch):
     client=Client();monkeypatch.setattr(obs,"get_langfuse",lambda:client)
-    def create(**kwargs):
-        text='{"answer":"private answer","memory":{}}'
-        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",message=SimpleNamespace(content=text))],
-            usage=SimpleNamespace(prompt_tokens=10,completion_tokens=4,total_tokens=14))
-    agent=ChatAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),"glm-test")
+    from langchain_core.messages import AIMessage
+    from tool_model_helpers import ToolModelStub
+    message = AIMessage(content='{"answer":"private answer","memory":{}}',
+        response_metadata={"finish_reason":"stop"}, usage_metadata={"input_tokens":10,"output_tokens":4,"total_tokens":14})
+    agent=ChatAgent("glm-test",tool_model=ToolModelStub(message))
     assert agent.decide("private message",history=[],memory_context=AgentContext(scope=MemoryScope(kind="CONVERSATION",id="C"))).answer=="private answer"
     assert [span.values["name"] for span in client.spans]==["entry-decision"]
     assert all(span.updates[0]["usage_details"]=={"input":10,"output":4,"total":14} for span in client.spans)

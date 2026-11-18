@@ -12,7 +12,7 @@ def agent(content, finish="stop"):
     def create(**kwargs):
         calls.append(kwargs)
         return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish, message=SimpleNamespace(content=content))])
-    return InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), "test-model"), calls
+    return InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), "test-model", tool_model=None), calls
 
 
 def test_observation_prompt_and_structured_response():

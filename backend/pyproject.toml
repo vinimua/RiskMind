@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi",
   "langgraph",
+  "langchain-openai>=1.7,<2",
   "openai",
   "uvicorn[standard]",
   "pydantic-settings",
@@ -33,3 +34,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]

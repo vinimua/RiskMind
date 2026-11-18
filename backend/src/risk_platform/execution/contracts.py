@@ -1,7 +1,8 @@
-"""Stage 7A：知识请求与执行事实契约，不预建其他 capability 的载荷。"""
+"""各工具的请求、结果与执行事实契约；请求模型同时生成模型可见参数声明。"""
 
 from enum import StrEnum
-from typing import Self
+from dataclasses import dataclass
+from typing import Literal, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator, field_validator
 
@@ -14,6 +15,52 @@ from risk_platform.workflow.contracts import CapabilityType
 
 class ExecutionContract(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class CsvStatisticsRequest(ExecutionContract):
+    dataset_id: _NonBlankString
+    statistic: Literal["SAMPLE_COUNT", "BAD_LABEL_RATE", "MISSING_RATE"]
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+    field: _NonBlankString | None = None
+
+    @model_validator(mode="after")
+    def validate_query(self) -> Self:
+        if self.window_start >= self.window_end:
+            raise ValueError("统计窗口必须为非空左闭右开区间")
+        if (self.statistic == "MISSING_RATE") != (self.field is not None):
+            raise ValueError("仅缺失率统计必须提供 field")
+        return self
+
+
+class CsvStatisticsPayload(ExecutionContract):
+    request: CsvStatisticsRequest
+    dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    rules_version: Literal["csv-statistics/v1"] = "csv-statistics/v1"
+    outcome: Literal["VALUE_AVAILABLE", "NO_ROWS"]
+    sample_count: int = Field(ge=0, strict=True)
+    numerator: int = Field(ge=0, strict=True)
+    value: float | None = Field(allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_statistics(self) -> Self:
+        if self.numerator > self.sample_count:
+            raise ValueError("分子不能超过窗口样本数")
+        if self.outcome != ("NO_ROWS" if self.sample_count == 0 else "VALUE_AVAILABLE"):
+            raise ValueError("结果状态与样本数不一致")
+        if self.request.statistic == "SAMPLE_COUNT":
+            expected = self.sample_count
+            if self.numerator != self.sample_count:
+                raise ValueError("样本计数的分子必须等于样本数")
+        else:
+            expected = self.numerator / self.sample_count if self.sample_count else None
+        if self.value != expected:
+            raise ValueError("统计值与分子、分母不一致")
+        return self
+
+
+class CsvStatisticsReference(ExecutionContract):
+    reference_id: Literal["aggregate"]
 
 
 class ExecutionStatus(StrEnum):
@@ -122,3 +169,11 @@ class TaskExecutionResult(ExecutionContract):
         elif self.payload is not None or self.error is None:
             raise ValueError("失败或拒绝执行必须包含错误且不能包含部分载荷")
         return self
+
+
+@dataclass(frozen=True)
+class QueryOutcome:
+    """请求阶段的业务产物；阶段执行器负责将其保存或从账本恢复。"""
+    candidate: object = None
+    tool_name: str | None = None
+    failure: TaskExecutionResult | None = None

@@ -65,11 +65,8 @@ async def _authorize_memory(session, row, runtime):
     if round_row is None:
         raise ledger.LedgerIntegrityError("记忆轮次缺失")
     historical_runtime = replace(runtime, round=ledger._read(round_row, RoundRecord))
-    from risk_platform.workflow.knowledge_tool import knowledge_execution, knowledge_authorizer
+    from risk_platform.workflow.knowledge_tool import knowledge_execution, knowledge_tool
     from risk_platform.workflow.runtime import InvestigationAction, InvestigationAccessError
-    trusted = knowledge_execution(historical_runtime, InvestigationAction.READ)
-    if knowledge_authorizer(historical_runtime)(trusted.actor_id, "knowledge:search", trusted) is not True:
-        raise InvestigationAccessError("当前无权读取知识派生记忆")
     result = await session.get(ResultRow, memory.source_id)
     if result is None:
         raise ledger.LedgerIntegrityError("记忆来源结果缺失")
@@ -79,6 +76,14 @@ async def _authorize_memory(session, row, runtime):
                if fact.artifact is not None and fact.attempt_id == result.attempt_id]
     if len(matches) != 1 or matches[0] is None:
         raise ledger.LedgerIntegrityError("记忆来源未可靠提交")
+    for execution_id in matches[0].execution_refs:
+        execution_row = await session.scalar(select(ResultRow).where(ResultRow.execution_id == execution_id))
+        execution = ledger.read_artifact(execution_row).execution
+        if execution.tool_name in (None, "knowledge_search"):
+            trusted = knowledge_execution(historical_runtime, InvestigationAction.READ)
+            if knowledge_tool(historical_runtime).authorizer(historical_runtime, action=InvestigationAction.READ)(trusted.actor_id, "knowledge:search", trusted) is not True:
+                raise InvestigationAccessError("当前无权读取知识派生记忆")
+            break
     expected = extract_memory(investigation_id=memory.scope.id, source_result_id=result.result_id, observation=matches[0])
     if expected != memory:
         raise ledger.LedgerIntegrityError("记忆内容与来源不一致")

@@ -71,8 +71,8 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
     if not values:
         return
     identity, context = invocation.identity, runtime
-    # v2 同时标识统一拓扑；旧 v1 不能仅因 JSON 字段相似就自动接续。
-    if type(values.get("checkpoint_schema_version")) is not int or values["checkpoint_schema_version"] != 2:
+    # v2 是原单轮记录；v3 结束时必须有正式推进决定。旧 v1 不自动转换。
+    if type(values.get("checkpoint_schema_version")) is not int or values["checkpoint_schema_version"] not in (2, 3):
         raise ledger.LedgerIntegrityError("检查点版本不兼容统一拓扑，需要显式迁移后恢复")
     if type(values.get("round_complete", False)) is not bool:
         raise ledger.LedgerIntegrityError("checkpoint 轮次结束标记必须是布尔值")
@@ -87,7 +87,7 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
         await invocation.guard.check_lock()
         plan_row = await session.get(AcceptedPlanRow, identity.plan_id)
         if plan_row is None:
-            if "investigation_plan" in values or values.get("task_execution_results") or values.get("observation") or values.get("round_complete"):
+            if values.get("investigation_plan") is not None or values.get("task_execution_results") or values.get("observation") or values.get("round_complete"):
                 raise ledger.LedgerIntegrityError("尚未接受计划的检查点不能宣称已有执行产物")
             root = await session.get(PlanningRunRow, identity.run_id)
             if root is not None:
@@ -99,7 +99,7 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
             return
         await invocation.guard.check(session)
         accepted = ledger._read(plan_row, AcceptedPlan).plan
-        if "investigation_plan" not in values:
+        if values.get("investigation_plan") is None:
             if values.get("task_execution_results") or values.get("observation") or values.get("round_complete"):
                 raise ledger.LedgerIntegrityError("checkpoint 缺正式计划却宣称已有产物")
             return
@@ -129,9 +129,10 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
             if authoritative is None:
                 from risk_platform.workflow.persistence.recovery_contracts import RegisteredCall
                 call = formed.query_request
-                kind = OperationType.TOOL_EXECUTION if isinstance(call, RegisteredCall) else OperationType.KNOWLEDGE_EXECUTION
+                kind = OperationType.TOOL_EXECUTION if result.tool_name is not None else OperationType.KNOWLEDGE_EXECUTION
                 authoritative = (await selected(kind, task_id=task.task_id,
-                    candidate=call.arguments if isinstance(call, RegisteredCall) else call)).execution
+                    candidate=call.arguments if isinstance(call, RegisteredCall) else
+                        call.model_dump(mode="json") if kind == OperationType.TOOL_EXECUTION else call)).execution
             if authoritative != result:
                 raise ledger.LedgerIntegrityError("checkpoint 执行事实与不可变账本不一致")
             task.status = TaskStatus.COMPLETED if result.status == "SUCCEEDED" else TaskStatus.FAILED
@@ -145,5 +146,14 @@ async def validate_checkpoint(values, invocation, *, sessions, runtime):
                 raise ledger.LedgerIntegrityError("checkpoint 解释与账本不一致")
         if values.get("round_complete") and values.get("observation") is None:
             raise ledger.LedgerIntegrityError("checkpoint 未解释却宣称本轮完成")
+        if values.get("round_complete") and values["checkpoint_schema_version"] == 3:
+            from risk_platform.workflow.persistence.contracts import RoundProgression
+            from risk_platform.workflow.persistence.models import RoundProgressionRow
+            row = await session.get(RoundProgressionRow, identity.round_id)
+            if row is None:
+                raise ledger.LedgerIntegrityError("检查点停止标记缺少正式推进决定")
+            decision = ledger._read(row, RoundProgression)
+            if decision.next_round_id is not None or values.get("stop_reason") != decision.stop_reason:
+                raise ledger.LedgerIntegrityError("检查点停止结果与推进账本不一致")
         if values.get("investigation_status", "OPEN") != "OPEN":
             raise ledger.LedgerIntegrityError("首轮恢复不能关闭案件")

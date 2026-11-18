@@ -46,3 +46,26 @@ def test_alert_uses_persistent_runner_and_reuses_results(database,monkeypatch):
             with pytest.raises(LedgerConflictError):
                 await app.from_alert(alert.model_copy(update={"symptom":"different"}),actor="A")
     asyncio.run(scenario())
+
+
+def test_progress_authorizes_latest_round_without_loading_first_round(database):
+    from risk_platform.workflow.persistence import repository as ledger
+    from risk_platform.workflow.persistence.contracts import InvestigationRecord, RoundRecord
+    from test_runtime import planning
+    reads = []
+    async def scenario():
+        async with resources(database, Planner(), setup=True) as (sessions, saver, runner):
+            async with sessions.begin() as session:
+                await ledger.register_investigation(session, InvestigationRecord(
+                    investigation_id="I", created_by="A", planning_input=planning()))
+                for number in (1, 2):
+                    await ledger.register_round(session, RoundRecord(
+                        investigation_id="I", round_id=f"R{number}", round_number=number))
+            app = service(sessions, runner, Chat())
+            app.authorize_resource = lambda actor, action, resource: reads.append((action, resource.round_id)) or True
+            assert "暂无已提交结果" in await app._progress("A", "I")
+            assert reads == [("investigation:read", "R2")]
+            with pytest.raises(chat_store.ChatNotFoundError):
+                await app._progress("A", "missing")
+    from risk_platform.conversations import repository as chat_store
+    asyncio.run(scenario())

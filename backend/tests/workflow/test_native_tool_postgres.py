@@ -21,12 +21,10 @@ from test_recovery_postgres import Agent, context, resources, retrieval, seed
 def test_native_selection_is_committed_and_resume_does_not_repeat_model_or_tool(database, monkeypatch, selected_name):
     agent, sdk_calls = Agent(), []
     retrieval(monkeypatch, agent)
-    def create(**payload):
-        sdk_calls.append(payload)
-        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="tool_calls", message=SimpleNamespace(
-            content=None, tool_calls=[SimpleNamespace(type="function", function=SimpleNamespace(
-                name=selected_name, arguments=json.dumps({"query": "Query native", "top_k": 1})))]))])
-    real_agent = InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), agent.model)
+    from tool_model_helpers import ToolModelStub, tool_response
+    model = ToolModelStub(tool_response(selected_name, {"query": "Query native", "top_k": 1}))
+    sdk_calls = model.calls
+    real_agent = InvestigationAgent(None, agent.model, tool_model=model)
     agent.formulate_tool_call = real_agent.formulate_tool_call
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
@@ -40,7 +38,10 @@ def test_native_selection_is_committed_and_resume_does_not_repeat_model_or_tool(
             result = first["task_execution_results"][0]
             async with sessions() as session:
                 operations = list(await session.scalars(select(OperationRow)))
-                assert all(ledger.read_operation(row).tool_name == "knowledge_search" for row in operations)
+                tool_operations = [ledger.read_operation(row) for row in operations
+                                   if row.operation_type == "TOOL_EXECUTION"]
+                assert all(value.tool_name == "knowledge_search" for value in tool_operations)
+                assert len(tool_operations) == int(selected_name == "knowledge_search")
                 attempts = list(await session.scalars(select(AttemptRow)))
                 if selected_name == "knowledge_search":
                     assert result.status == "SUCCEEDED" and len(attempts) == 3

@@ -76,7 +76,18 @@ def run(results, data=None, failure=None):
                 raise failure
             return ObservationDraft.model_validate(data if data is not None else draft(results))
     return asyncio.run(nodes.observation(current(results), investigation_agent=Agent(), runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(
-        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))['observation']
+        actor_id="trusted", index_profile=IndexProfile.PARENT_CHILD)), observation_phase=run_phase))['observation']
+
+
+def test_observation_validates_round_once_before_entering_stage(monkeypatch):
+    calls = []
+    original = nodes.validate_round_inputs
+    def validate(plan, results):
+        calls.append(True)
+        return original(plan, results)
+    monkeypatch.setattr(nodes, "validate_round_inputs", validate)
+    assert run([execution()]).status == "SUCCEEDED"
+    assert len(calls) == 1
 
 
 def test_mixed_results_keep_failure_facts_and_traceable_historical_finding():
@@ -231,7 +242,7 @@ def test_actual_deadline_without_partial_output():
             time.sleep(.04)
             return ObservationDraft.model_validate(draft(results))
     ctx = KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD, timeout_seconds=.001)
-    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), runtime_context=runtime_for((current(results))["planning_input"], ctx), execute_phase=run_phase))
+    result = asyncio.run(nodes.observation(current(results), investigation_agent=Slow(), runtime_context=runtime_for((current(results))["planning_input"], ctx), observation_phase=run_phase))
     assert result["observation"].error.code == "OBSERVATION_TIMEOUT"
 
 
@@ -257,7 +268,9 @@ def test_business_observation_does_not_close_case_or_change_execution_results(mo
         state["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD),
         allow_unscoped=True)))
     assert output["round_complete"] is True and output["investigation_status"] == "OPEN"
-    assert output["task_execution_results"] == results
+    assert output["task_execution_results"] == [
+        r.model_copy(update={"tool_name": "knowledge_search", "result_version": "1"}) for r in results
+    ]
     assert output["observation"].status == ("INCONCLUSIVE" if bad_model else "SUCCEEDED")
     assert "hypotheses" not in output and "investigation_complete" not in output
 
@@ -290,7 +303,7 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
             data = draft(supplied)
             return ObservationDraft.model_validate(data)
     output = asyncio.run(nodes.observation(current(results), investigation_agent=MutatingAgent(),
-        runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD)), execute_phase=run_phase))
+        runtime_context=runtime_for((current(results))["planning_input"], KnowledgeExecutionContext(actor_id="a", index_profile=IndexProfile.PARENT_CHILD)), observation_phase=run_phase))
     assert output["observation"].error.code == "OBSERVATION_INVALID"
     assert results[0].payload.resolved.contexts[0].content == original_text
     assert results[0].payload.retrieved.hits[0].hit.source.document_version == "v1"

@@ -17,6 +17,7 @@ from risk_platform.workflow.runtime import InvestigationResource, InvestigationA
 from risk_platform.workflow.access import load_runtime_context
 from risk_platform.workflow.invocation import InvestigationInvocation
 from risk_platform.workflow.run_guard import RecoveryBlockedError
+from risk_platform.execution.tools import tool_definition
 
 
 class AlertRequest(MonitoringAlert):
@@ -40,6 +41,14 @@ class EntryServices:
         self.authorize_resource = authorize_resource
         self.authorize_conversation = authorize_conversation
         self.timeout_seconds = timeout_seconds
+
+    def _planning_source(self, actor, **source):
+        value = InitialPlanningInput(**source, available_capabilities=[])
+        # tools_for 负责授权与绑定；注册中心负责确认工具真实存在，不补默认能力。
+        capabilities = list(dict.fromkeys(
+            tool_definition(tool.name).capability for tool in self.tools_for(actor, value)
+        ))
+        return InitialPlanningInput(**source, available_capabilities=capabilities)
 
     def _resource_permission(self, actor, action, resource):
         try:
@@ -93,15 +102,20 @@ class EntryServices:
     async def from_alert(self, request, *, actor):
         actor = TypeAdapter(Identity).validate_python(actor)
         request = AlertRequest.model_validate_json(request.model_dump_json())
-        source = InitialPlanningInput(monitoring_alert=request, available_capabilities=["KNOWLEDGE_RETRIEVAL"])
+        source = self._planning_source(actor, monitoring_alert=request)
         case_id = chat_store.stable_id("case-alert-", request.alert_id)
         await self._create_case(actor, case_id, source)
         result = await self._run_case(actor, case_id)
         return {"investigation_id": case_id, **result}
 
     async def _progress(self, actor, case_id):
-        runtime = await self._runtime(actor, case_id, execute=False)
         async with self.sessions() as session:
+            latest = await session.scalar(select(RoundRow).where(RoundRow.investigation_id == case_id)
+                                          .order_by(RoundRow.round_number.desc()))
+            if latest is None:
+                raise chat_store.ChatNotFoundError("案件不可访问")
+            runtime = await load_runtime_context(session, investigation_id=case_id, round_id=latest.round_id,
+                actor_id=actor, authorize_resource=self.authorize_resource, action=InvestigationAction.READ)
             plan = await session.scalar(select(AcceptedPlanRow).where(AcceptedPlanRow.round_id == runtime.round.round_id))
             run = await session.scalar(select(InvestigationRunRow).where(InvestigationRunRow.round_id == runtime.round.round_id))
             statuses, observation = [], "尚未形成"
@@ -116,7 +130,12 @@ class EntryServices:
                     if artifact.observation is not None:
                         observation = artifact.observation.status
             # 仅输出进度，不把知识正文或历史 finding 绕过工具范围授权传给聊天。
-            return f"案件 {case_id} 仍为 OPEN。正式计划：{'已接受' if plan else '尚未接受'}；执行状态：{'、'.join(statuses) or '暂无已提交结果'}；本轮解释：{observation}。不表示已确认根因或关闭案件。"
+            from risk_platform.workflow.persistence.models import RoundProgressionRow
+            from risk_platform.workflow.persistence.contracts import RoundProgression
+            progression = await session.get(RoundProgressionRow, runtime.round.round_id)
+            reason = ledger._read(progression, RoundProgression).stop_reason if progression else None
+            return (f"案件 {case_id} 仍为 OPEN。正式计划：{'已接受' if plan else '尚未接受'}；执行状态：{'、'.join(statuses) or '暂无已提交结果'}；本轮解释：{observation}。不表示已确认根因或关闭案件。"
+                    + (f"停止原因：{reason}" if reason else ""))
     @trace_chat
     async def chat(self, request, *, actor):
         """一次模型决策；查询立即执行，启动调查等待确认。"""
@@ -251,8 +270,8 @@ class EntryServices:
                 result_case = case_id
             else:
                 #把用户消息和选定模型转换成调查输入。当前这里明确只提供知识检索能力
-                source = InitialPlanningInput(user_query=UserQuery(query=message, model_id=decision.arguments.model_id),
-                    available_capabilities=["KNOWLEDGE_RETRIEVAL"])
+                source = self._planning_source(actor,
+                    user_query=UserQuery(query=message, model_id=decision.arguments.model_id))
                 result_case = await self._create_case(actor, case_id, source)
                 await self._run_case(actor, case_id)
                 answer = await self._progress(actor, case_id)

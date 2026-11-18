@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
@@ -10,14 +11,13 @@ from risk_platform.workflow.contracts import InitialPlanningInput
 from risk_platform.workflow.runtime import InvestigationAction, check_runtime
 from risk_platform.workflow.nodes import (
     observation,
-    replanning,
     task_execution,
 )
 from risk_platform.workflow.state import InvestigationState
 from risk_platform.workflow.invocation import InvestigationInvocation, require_invocation
 
 
-def _route_after_replanning(
+def _route_after_observation(
     state: InvestigationState,
 ) -> Literal["continue", "round_complete"]:
 
@@ -33,16 +33,6 @@ def build_investigation_graph(
     if session_factory is None or checkpointer is None:
         raise ValueError("正式执行必须配置账本会话与检查点存储")
 
-    def require_run_context(runtime):
-        # 声明类型与实际调用一致，不再兼容裸 InvestigationRuntimeContext。
-        return require_invocation(runtime.context, claimed=True)
-
-    # 它把两项依赖交给账本适配器：
-    # session_factory：访问账本数据库；
-    # call.execution：本轮运行身份、运行锁、代次和重试策略。
-    def phase_executor(call):
-        return phase_execution.ledger_phase_executor(session_factory, call.execution, runtime=call.runtime, agent=investigation_agent)
-
     # LangGraph 传入 runtime
     #     ↓
     # 取出 runtime.context
@@ -53,41 +43,56 @@ def build_investigation_graph(
 # call.runtime     # 身份、案件、工具绑定
 # call.execution   # 运行规格、guard、重试策略
     async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = require_run_context(runtime)
+        call = await planning.current_round_call(state, require_invocation(runtime.context, claimed=True), sessions=session_factory)
         return await planning.prepare_plan(state, call.execution, sessions=session_factory, agent=investigation_agent, runtime=call.runtime)
 
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = require_run_context(runtime)
-        source = InitialPlanningInput.model_validate(state["planning_input"])
-        #进入任务执行前，核对“当前身份是否允许继续调查，以及 State 中的调查输入是否与可信案件一致”
-        check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        call = await planning.current_round_call(state, require_invocation(runtime.context, claimed=True), sessions=session_factory)
         update = await task_execution(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
-                                    execute_phase=phase_executor(call))
+                                    query_phase=partial(phase_execution.query_phase, sessions=session_factory, call=call,
+                                                        model_name=investigation_agent.model),
+                                    tool_phase=partial(phase_execution.tool_phase, sessions=session_factory, call=call))
         return to_checkpoint_data(update)
 
+# graph.py：传入函数并预填依赖
+#     ↓
+# nodes.observation()：调用它
+#     ↓
+# phase_execution.observation_phase()：执行或复用解释
+#     ↓
+# _phase()：负责账本和事务
     async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
-        call = require_run_context(runtime)
+        root = require_invocation(runtime.context, claimed=True)
+        # root 是校验后的 runtime.context，不是外层的 LangGraph runtime
+    # runtime                         LangGraph 运行容器
+    # └─ context                  InvestigationInvocation
+    #      ├─ runtime             可信业务上下文
+    #      └─ execution           运行身份、Guard、恢复策略
+        call = await planning.current_round_call(state, root, sessions=session_factory)
         source = InitialPlanningInput.model_validate(state["planning_input"])
         check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
+        async with session_factory() as session:
+            material = await planning.round_material(session, call.execution, call.runtime)
         update = await observation(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
-                                 execute_phase=phase_executor(call))
+                                 observation_phase=partial(phase_execution.observation_phase, sessions=session_factory,
+                                                           call=call, model_name=investigation_agent.model),
+                                 previous_observations=material.get("previous_observations", ()))
+        update.update(await planning.advance_round(state | update, call, root, sessions=session_factory))
         return to_checkpoint_data(update)
 
     graph = StateGraph(InvestigationState, context_schema=InvestigationInvocation)
     graph.add_node("prepare_plan", plan_node)
     graph.add_node("task_execution", execute_node)
     graph.add_node("observation", observe_node)
-    graph.add_node("replanning", replanning)
 
     graph.add_edge(START, "prepare_plan")
     graph.add_edge("prepare_plan", "task_execution")
     graph.add_edge("task_execution", "observation")
-    graph.add_edge("observation", "replanning")
     graph.add_conditional_edges(
-        "replanning",
-        _route_after_replanning,
+        "observation",
+        _route_after_observation,
         {
-            "continue": "task_execution",
+            "continue": "prepare_plan",
             "round_complete": END,
         },
     )

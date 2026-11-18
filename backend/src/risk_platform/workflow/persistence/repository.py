@@ -215,7 +215,7 @@ async def _validate_artifact(session, operation, artifact):
                 definition = tool_definition(call.tool_name)
                 if call.tool_name not in operation.tool_limits or definition.capability != operation.capability:
                     raise LedgerIntegrityError("工具选择不属于本次任务或允许列表")
-                definition.request_model.model_validate(call.arguments)
+                definition.tool.args_schema.model_validate(call.arguments)
             elif (artifact.execution is None or artifact.execution.task_id != operation.task_id or
                   artifact.execution.capability != operation.capability or artifact.execution.status == "SUCCEEDED"):
                 raise LedgerIntegrityError("请求形成产物与任务不匹配")
@@ -227,10 +227,10 @@ async def _validate_artifact(session, operation, artifact):
             definition = tool_definition(operation.tool_name)
             if result.result_version != definition.result_version:
                 raise LedgerIntegrityError("工具结果协议版本不一致")
-            definition.request_model.model_validate(operation.candidate_request)
+            definition.tool.args_schema.model_validate(operation.candidate_request)
             if result.payload is not None:
                 payload = definition.result_model.model_validate(result.payload)
-                definition.validate_result(definition.request_model.model_validate(operation.candidate_request),
+                definition.validate_result(definition.tool.args_schema.model_validate(operation.candidate_request),
                                               operation.tool_limits[operation.tool_name], payload)
         return
     if operation.operation_type == OperationType.QUERY_FORMULATION:

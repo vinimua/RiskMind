@@ -112,6 +112,16 @@ def record_usage(response):
         logger.warning("Langfuse usage recording failed; ignored")
 
 
+def record_langchain_usage(message):
+    """LangChain 模型调用使用其标准 usage_metadata，不解析 SDK 的原始响应。"""
+    usage = message.usage_metadata or {}
+    details = {target: usage[source] for source, target in (
+        ("input_tokens", "input"), ("output_tokens", "output"), ("total_tokens", "total")
+    ) if type(usage.get(source)) is int and usage[source] >= 0}
+    if details:
+        _update(_current.get(), usage_details=details)
+
+
 def tag_chat_turn(conversation_id, turn_id, action, *, cached=False):
     # conversation/turn 均为本系统生成的哈希身份，不导出原 actor、request_id 或案件目标。
     _update(_current.get(), metadata={"conversation_id": conversation_id, "turn_id": turn_id,

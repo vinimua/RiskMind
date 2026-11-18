@@ -17,13 +17,11 @@ def test_real_sdk_context_usage_and_privacy(monkeypatch):
     client=langfuse.Langfuse(public_key="pk-offline-"+uuid4().hex,secret_key="sk-offline",base_url="http://offline.invalid",
         span_exporter=exporter,httpx_client=httpx.Client(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={})) ))
     monkeypatch.setattr(obs,"get_langfuse",lambda:client)
-    calls=[]
-    def create(**kwargs):
-        calls.append(1)
-        content='{"answer":"PRIVATE_SENTINEL","memory":{}}'
-        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",message=SimpleNamespace(content=content))],
-            usage=SimpleNamespace(prompt_tokens=3,completion_tokens=2,total_tokens=5))
-    agent=ChatAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))),"test-model")
+    from langchain_core.messages import AIMessage
+    from tool_model_helpers import ToolModelStub
+    message = AIMessage(content='{"answer":"PRIVATE_SENTINEL","memory":{}}',
+        response_metadata={"finish_reason":"stop"},usage_metadata={"input_tokens":3,"output_tokens":2,"total_tokens":5})
+    agent=ChatAgent("test-model",tool_model=ToolModelStub(message))
     @obs.trace_chat
     async def scenario():
         await asyncio.to_thread(agent.decide,"PRIVATE_SENTINEL",history=[],

@@ -34,6 +34,26 @@ class RoundRow(PayloadRow, Base):
     )
 
 
+class RoundProgressionRow(PayloadRow, Base):
+    __tablename__ = "investigation_round_progressions"
+    source_round_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    investigation_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    root_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_run_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    observation_result_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    next_round_id: Mapped[str | None] = mapped_column(String(128), unique=True)
+    __table_args__ = (
+        ForeignKeyConstraint(["investigation_id", "source_round_id"],
+            ["investigation_rounds.investigation_id", "investigation_rounds.round_id"]),
+        ForeignKeyConstraint(["investigation_id", "next_round_id"],
+            ["investigation_rounds.investigation_id", "investigation_rounds.round_id"]),
+        ForeignKeyConstraint(["root_run_id"], ["investigation_runs.run_id"]),
+        ForeignKeyConstraint(["source_run_id"], ["investigation_runs.run_id"]),
+        ForeignKeyConstraint(["observation_result_id"], ["investigation_results.result_id"]),
+        CheckConstraint("schema_version = 1", name="ck_progression_schema"),
+    )
+
+
 class AcceptedPlanRow(PayloadRow, Base):
     __tablename__ = "investigation_plans"
     plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)

@@ -39,6 +39,24 @@ class KnowledgeSearchTool:
         if not callable(self.authorize):
             raise InvestigationAccessError("知识工具必须配置授权函数")
 
+    def execution_context(self, timeout_seconds) -> KnowledgeExecutionContext:
+        """纯配置提取：运行预算只收紧工具预算，不修改应用授予的原始配置。"""
+        execution = KnowledgeExecutionContext.model_validate_json(self.execution.model_dump_json())
+        return execution.model_copy(update={"timeout_seconds": min(execution.timeout_seconds, timeout_seconds)})
+
+    def authorizer(self, context, *, action=InvestigationAction.CONTINUE):
+        """绑定已确定的工具；每次实际授权仍重新核对案件权限和工具数据权限。"""
+        def authorize(actor, tool_action, execution):
+            try:
+                check_runtime(context, action)
+                trusted = self.execution_context(context.timeout_seconds)
+                if actor != trusted.actor_id or execution != trusted:
+                    return False
+                return self.authorize(actor, tool_action, execution) is True
+            except Exception:
+                return False
+        return authorize
+
 
 def knowledge_tool(context: InvestigationRuntimeContext) -> KnowledgeSearchTool:
     """缺少绑定就拒绝；不使用默认工具、默认 profile 或模型提供的配置。"""
@@ -51,20 +69,4 @@ def knowledge_tool(context: InvestigationRuntimeContext) -> KnowledgeSearchTool:
 def knowledge_execution(context: InvestigationRuntimeContext, action: InvestigationAction,
                         planning_input=None) -> KnowledgeExecutionContext:
     check_runtime(context, action, planning_input)
-    tool = knowledge_tool(context)
-    execution = KnowledgeExecutionContext.model_validate_json(tool.execution.model_dump_json())
-    # 模型阶段使用通用运行预算；工具执行不能超过运行预算，保留更严格的工具限制。
-    return execution.model_copy(update={"timeout_seconds": min(execution.timeout_seconds, context.timeout_seconds)})
-
-
-def knowledge_authorizer(context: InvestigationRuntimeContext):
-    """每次工具调用重新核对调查权限，再调用工具自己的授权函数。"""
-    def authorize(actor, action, execution):
-        try:
-            trusted = knowledge_execution(context, InvestigationAction.CONTINUE)
-            if actor != trusted.actor_id or execution != trusted:
-                return False
-            return knowledge_tool(context).authorize(actor, action, execution) is True
-        except Exception:
-            return False
-    return authorize
+    return knowledge_tool(context).execution_context(context.timeout_seconds)

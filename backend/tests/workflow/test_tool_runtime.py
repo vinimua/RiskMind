@@ -4,9 +4,18 @@ from dataclasses import replace
 
 import pytest
 
-from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool, knowledge_execution, knowledge_authorizer
+from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool, knowledge_execution
 from risk_platform.workflow.runtime import InvestigationAction, InvestigationAccessError, check_runtime
 from test_runtime import make_runtime, planning
+
+
+def test_reading_tool_limits_does_not_repeat_resource_authorization():
+    from risk_platform.execution.tools import KNOWLEDGE_SEARCH
+    calls = []
+    context = make_runtime(planning(), authorize_resource=lambda *_: calls.append(True) or True)
+    calls.clear()
+    assert KNOWLEDGE_SEARCH.execution_limits(context)["max_top_k"] == context.tools[0].execution.max_top_k
+    assert calls == []
 
 
 def test_generic_runtime_needs_no_knowledge_tool():
@@ -56,14 +65,14 @@ def test_budget_is_capped_without_mutating_original_grant():
     execution = knowledge_execution(limited, InvestigationAction.CONTINUE)
     assert execution.timeout_seconds == 1
     assert context.tools[0].execution.timeout_seconds > 1
-    assert knowledge_authorizer(limited)(execution.actor_id, "knowledge:search", execution) is True
+    assert limited.tools[0].authorizer(limited)(execution.actor_id, "knowledge:search", execution) is True
 
 
 def test_tool_permission_is_independent_and_rechecked():
     permission = {"allowed": True}
     context = make_runtime(planning(), authorize_knowledge=lambda *_: permission["allowed"])
     execution = knowledge_execution(context, InvestigationAction.CONTINUE)
-    authorize = knowledge_authorizer(context)
+    authorize = context.tools[0].authorizer(context)
     assert authorize(execution.actor_id, "knowledge:search", execution) is True
     permission["allowed"] = False
     assert authorize(execution.actor_id, "knowledge:search", execution) is False

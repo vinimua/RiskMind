@@ -60,6 +60,27 @@ class AcceptedPlan(LedgerContract):
         return self
 
 
+class RoundProgression(LedgerContract):
+    """已接受的轮次推进结果；引用正式 Observation，不复制模型解释。"""
+    root_run_id: Identity
+    source_run_id: Identity
+    investigation_id: Identity
+    source_round_id: Identity
+    observation_result_id: Identity
+    next_round_id: Identity | None = None
+    next_run_id: Identity | None = None
+    next_plan_id: Identity | None = None
+    stop_reason: str | None = None
+
+    @model_validator(mode="after")
+    def complete_transition(self) -> Self:
+        targets = (self.next_round_id, self.next_run_id, self.next_plan_id)
+        if not (all(targets) and self.stop_reason is None or
+                all(t is None for t in targets) and self.stop_reason and self.stop_reason.strip()):
+            raise ValueError("推进必须有完整后继身份，停止必须有原因")
+        return self
+
+
 class OperationType(StrEnum):
     QUERY_FORMULATION = "QUERY_FORMULATION"
     KNOWLEDGE_EXECUTION = "KNOWLEDGE_EXECUTION"

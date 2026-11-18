@@ -81,7 +81,7 @@ def _monitoring_alert() -> MonitoringAlert:
 
 def test_initial_plan_converts_draft_to_system_managed_tasks() -> None:
     client = FakeClient(_plan_json())
-    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash", tool_model=None)
 
     plan = agent.initial_plan(_user_planning_input())
 
@@ -93,7 +93,7 @@ def test_initial_plan_converts_draft_to_system_managed_tasks() -> None:
     context = json.loads(call["messages"][1]["content"])
     assert context == {
         "source": "USER_QUERY",
-        "available_capabilities": ["KNOWLEDGE_RETRIEVAL"],
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "COMPUTATION"],
         "query": "为什么 credit_v3 最近 KS 下降？",
         "model_id": "credit_v3",
         "time_window": None,
@@ -106,7 +106,7 @@ def test_initial_plan_converts_draft_to_system_managed_tasks() -> None:
 
 def test_initial_plan_serializes_monitoring_alert_as_json_data() -> None:
     client = FakeClient(_plan_json())
-    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash", tool_model=None)
     planning_input = InitialPlanningInput(
         monitoring_alert=_monitoring_alert(),
         available_capabilities=_available_capabilities(),
@@ -117,7 +117,7 @@ def test_initial_plan_serializes_monitoring_alert_as_json_data() -> None:
     context = json.loads(client.completions.calls[0]["messages"][1]["content"])
     assert context == {
         "source": "MONITORING_ALERT",
-        "available_capabilities": ["KNOWLEDGE_RETRIEVAL"],
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "COMPUTATION"],
         "alert_id": "ALERT-001",
         "model_id": "credit_v3",
         "metric": "KS",
@@ -139,14 +139,13 @@ def test_initial_planning_context_keeps_embedded_instructions_as_data() -> None:
     assert context["source"] == "USER_QUERY"
 
 
-def test_initial_plan_requires_knowledge_retrieval_capability() -> None:
+def test_initial_plan_requires_a_registered_capability() -> None:
     client = FakeClient(_plan_json())
-    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash", tool_model=None)
     planning_input = InitialPlanningInput(
         user_query=UserQuery(query="为什么 KS 下降？"),
         available_capabilities=[
             CapabilityType.FACT_RETRIEVAL,
-            CapabilityType.COMPUTATION,
         ],
     )
 
@@ -198,14 +197,14 @@ def test_initial_plan_requires_knowledge_retrieval_capability() -> None:
 )
 def test_initial_plan_rejects_fields_outside_draft_contract(content: dict) -> None:
     client = FakeClient(json.dumps(content, ensure_ascii=False))
-    agent = InvestigationAgent(client=client, model="glm-4.7-flash")
+    agent = InvestigationAgent(client=client, model="glm-4.7-flash", tool_model=None)
 
     with pytest.raises(ValidationError):
         agent.initial_plan(_user_planning_input())
 
 
 def test_initial_plan_rejects_invalid_json() -> None:
-    agent = InvestigationAgent(client=FakeClient("not-json"), model="glm-4.7-flash")
+    agent = InvestigationAgent(client=FakeClient("not-json"), model="glm-4.7-flash", tool_model=None)
 
     with pytest.raises(ValidationError):
         agent.initial_plan(_user_planning_input())
@@ -213,14 +212,14 @@ def test_initial_plan_rejects_invalid_json() -> None:
 
 def test_initial_plan_rejects_empty_tasks() -> None:
     content = json.dumps({"goal": "调查异常", "tasks": []}, ensure_ascii=False)
-    agent = InvestigationAgent(client=FakeClient(content), model="glm-4.7-flash")
+    agent = InvestigationAgent(client=FakeClient(content), model="glm-4.7-flash", tool_model=None)
 
     with pytest.raises(ValidationError):
         agent.initial_plan(_user_planning_input())
 
 
 def test_initial_plan_rejects_empty_model_content() -> None:
-    agent = InvestigationAgent(client=FakeClient(""), model="glm-4.7-flash")
+    agent = InvestigationAgent(client=FakeClient(""), model="glm-4.7-flash", tool_model=None)
 
     with pytest.raises(ValueError, match="没有返回任何内容"):
         agent.initial_plan(_user_planning_input())
@@ -232,4 +231,4 @@ def test_initial_plan_rejects_incomplete_response_even_if_json_is_valid(reason):
     client.completions.create = lambda **_: SimpleNamespace(choices=[
         SimpleNamespace(finish_reason=reason, message=SimpleNamespace(content=_plan_json()))])
     with pytest.raises(ValueError, match="未完整返回"):
-        InvestigationAgent(client=client, model="test-model").initial_plan(_user_planning_input())
+        InvestigationAgent(client=client, model="test-model", tool_model=None).initial_plan(_user_planning_input())

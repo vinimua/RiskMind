@@ -65,23 +65,22 @@ def test_finding_and_original_limit_are_kept_together():
 def test_agent_receives_grouped_content_in_both_model_requests():
     from risk_platform.agents.investigation import InvestigationAgent
     from risk_platform.workflow.contracts import InitialPlanningInput, UserQuery
-    from risk_platform.execution.tools import tool_declarations
+    from risk_platform.execution.tools import TOOL_DEFINITIONS
+    from tool_model_helpers import ToolModelStub, tool_response
     calls = []
     def create(**kwargs):
         calls.append(kwargs)
-        if "tools" not in kwargs:
-            return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(
-                content=json.dumps({"goal": "调查", "tasks": [{"objective": "查历史", "expected_result": "线索"}]})))])
-        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="tool_calls", message=SimpleNamespace(tool_calls=[
-            SimpleNamespace(type="function", function=SimpleNamespace(name="knowledge_search", arguments='{"query":"历史线索","top_k":1}'))]))])
-    agent = InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), "test")
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(
+            content=json.dumps({"goal": "调查", "tasks": [{"objective": "查历史", "expected_result": "线索"}]})))])
+    tool_model = ToolModelStub(tool_response())
+    agent = InvestigationAgent(SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), "test", tool_model=tool_model)
     source = InitialPlanningInput(user_query=UserQuery(query="原因"), available_capabilities=["KNOWLEDGE_RETRIEVAL"])
     context = assemble((memory(),))
     plan = agent.initial_plan(source, memory_context=context)
-    agent.formulate_tool_call(plan.tasks[0], source, goal=plan.goal, tools=tool_declarations(plan.tasks[0].capability),
+    agent.formulate_tool_call(plan.tasks[0], source, goal=plan.goal, tools=[d.tool for d in TOOL_DEFINITIONS.values() if d.capability == plan.tasks[0].capability],
         tool_limits={"knowledge_search": {"max_top_k": 5}}, memory_context=context)
-    for call in calls:
-        payload = json.loads(call["messages"][1]["content"])
+    for text in (calls[0]["messages"][1]["content"], tool_model.calls[0]["messages"][1][1]):
+        payload = json.loads(text)
         record = payload["historical_memory"]["memory"]["memories"][0]
         assert record["source_id"] == "result" and record["content"]["historical_findings"]
         assert "actor_id" not in payload and "authorize" not in payload

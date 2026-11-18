@@ -14,8 +14,7 @@ from risk_platform.workflow.contracts import (
     InvestigationTask,
     UserQuery,
 )
-from risk_platform.workflow.graph import _route_after_replanning, build_investigation_graph
-from risk_platform.workflow.nodes import initial_planning, replanning
+from risk_platform.workflow.graph import _route_after_observation, build_investigation_graph
 from risk_platform.workflow.invocation import InvestigationInvocation
 from test_runtime import make_runtime
 
@@ -72,7 +71,7 @@ def test_graph_requires_persistence_dependencies(missing):
 def test_single_persistent_topology() -> None:
     graph = _graph(FakeInvestigationAgent(_plan()))
     assert set(graph.get_graph().nodes) == {
-        "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
+        "__start__", "prepare_plan", "task_execution", "observation", "__end__",
     }
     # 恢复模块只能提供执行机制，不能再构造自己的 StateGraph。
     import ast
@@ -114,19 +113,12 @@ def test_round_ends_but_investigation_remains_open() -> None:
     assert "investigation_complete" not in result
 
 
-def test_new_round_resets_previous_round_end_flag() -> None:
-    state = {"planning_input": _planning_input(), "round_complete": True, "investigation_status": "OPEN"}
-    update = initial_planning(state, investigation_agent=FakeInvestigationAgent(_plan()))
-    assert update["round_complete"] is False
-    assert update["investigation_status"] == "OPEN"
-    assert update["task_execution_results"] == []
 
 
 def test_routing_uses_round_end_not_case_completion() -> None:
-    assert _route_after_replanning({"round_complete": True, "investigation_status": "OPEN"}) == "round_complete"
-    assert _route_after_replanning({"round_complete": False, "investigation_status": "OPEN"}) == "continue"
-    assert _route_after_replanning({"investigation_complete": True}) == "continue"
-    assert replanning({}) == {"round_complete": True, "investigation_status": "OPEN"}
+    assert _route_after_observation({"round_complete": True, "investigation_status": "OPEN"}) == "round_complete"
+    assert _route_after_observation({"round_complete": False, "investigation_status": "OPEN"}) == "continue"
+    assert _route_after_observation({"investigation_complete": True}) == "continue"
 
 
 def test_legacy_runner_import_is_the_same_implementation():

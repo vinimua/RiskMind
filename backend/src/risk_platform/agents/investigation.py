@@ -3,8 +3,9 @@
 import json
 
 from openai import OpenAI
+from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, ConfigDict, Field
-from risk_platform.core.observability import observe_generation, record_usage
+from risk_platform.core.observability import observe_generation, record_usage, record_langchain_usage
 
 from risk_platform.agents.prompts import (
     INITIAL_PLANNING_SYSTEM_PROMPT,
@@ -36,9 +37,10 @@ class _InitialPlanDraft(BaseModel):
 
 
 class InvestigationAgent:
-    def __init__(self, client: OpenAI, model: str):
+    def __init__(self, client: OpenAI, model: str, *, tool_model):
         self.client = client
         self.model = model
+        self.tool_model = tool_model
 
     @observe_generation("knowledge-observation")
     def observe_round(self, plan, results, *, planning_input=None, previous_observations=(), available_capabilities=()):
@@ -74,43 +76,37 @@ class InvestigationAgent:
                     raise ValueError("模型引用了未提供的工具结果项")
         return draft
 
-    def formulate_tool_call(self, task, planning_input, *, goal, tools, tool_limits, memory_context=None):
+    def formulate_tool_call(self, task, planning_input, *, goal, tools: list[StructuredTool], tool_limits, memory_context=None):
         """只看到本任务已绑定工具的公开声明与参数限制，不接受可信运行对象。"""
         from risk_platform.execution.tools import parse_tool_choice, required_tool_options
-        names = tuple(tool["function"]["name"] for tool in tools)
+        names = tuple(tool.name for tool in tools)
         if not names or len(names) != len(set(names)):
             raise ValueError("必须明确提供当前任务可用的工具")
+        # goal 和 objective：整体目标与当前任务
         payload = {
             "investigation_context": json.loads(build_initial_planning_context(planning_input)),
-            "goal": goal, "objective": task.objective,
-            "expected_result": task.expected_result, "tool_limits": tool_limits,
+            "goal": goal,
+            "objective": f"{task.objective}\n需要获取的信息：{task.expected_result}",
+            "tool_limits": tool_limits,
         }
         if memory_context is not None:
             from risk_platform.memory.context import model_context
             payload["historical_memory"] = model_context(memory_context)
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "system", "content": KNOWLEDGE_QUERY_SYSTEM_PROMPT},
-                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-            tools=tools, **required_tool_options(),
-        )
-        return parse_tool_choice(response.choices[0], task.capability, allowed_names=names)
+        tool_model = self.tool_model.bind_tools(tools, **required_tool_options())
+        response = tool_model.invoke([
+            ("system", KNOWLEDGE_QUERY_SYSTEM_PROMPT),
+            ("human", json.dumps(payload, ensure_ascii=False)),
+        ])
+        record_langchain_usage(response)
+        return parse_tool_choice(response, task.capability, allowed_names=names)
 
-    def formulate_knowledge_query(
-        self, task: InvestigationTask, planning_input: InitialPlanningInput,
-        *, goal: str, max_top_k: int,
-    ):
-        """独立知识查询构造接口；workflow 使用通用 formulate_tool_call。"""
-        from risk_platform.execution.tools import tool_declarations
-        if task.capability != CapabilityType.KNOWLEDGE_RETRIEVAL:
-            raise ValueError("Query Formulation 只支持知识检索任务")
-        call = self.formulate_tool_call(task, planning_input, goal=goal,
-            tools=tool_declarations(task.capability, names=("knowledge_search",)),
-            tool_limits={"knowledge_search": {"max_top_k": max_top_k}})
-        if call.arguments.top_k > max_top_k:
-            raise ValueError("工具请求数量超过本次允许上限")
-        return call.arguments
-
+# | 参数 | 含义 | 例子 |
+# |---|---|---|
+# | `planning_input` | 原始调查问题或告警，以及可用能力 | 调查 credit-v3 的 PSI 异常 |
+# | `memory_context` | 本次选中的历史记忆 | 以前调查过的相关情况 |
+# | `previous_observations` | 此前各轮已提交的发现和未解决问题 | 尚不知道特征版本是否发生变化 |
+# | `previous_tasks` | 以前实际执行过的任务和结果摘要 | 已检索标签规范，但零命中 |
+# | `remaining_task_budget` | 还能安排多少个任务 | 最多再安排 4 个任务 |
     def initial_plan(
         self,
         planning_input: InitialPlanningInput,
@@ -180,3 +176,9 @@ class InvestigationAgent:
                 for task in draft.tasks
             ],
         )
+
+# 模型填写：
+#     调查目标、任务目标、能力、预期结果
+
+# 程序填写：
+#     task_id、初始状态

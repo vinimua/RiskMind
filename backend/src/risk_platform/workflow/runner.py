@@ -20,7 +20,7 @@ from risk_platform.workflow.checkpoints import to_checkpoint_data, validate_chec
 
 
 class InvestigationRunner:
-    """首轮统一持久化入口；可以图内生成计划，也可以接续已有正式计划。
+    """调查统一持久化入口；跨轮保持同一检查点定位和案件运行权。
 
     首次执行与恢复共用此入口；不要求先有计划或 checkpoint，不接受用户指定恢复模式。
     不暴露任意 thread_id、State 更新或跳步恢复。
@@ -80,20 +80,43 @@ class InvestigationRunner:
                           allow_planning=creating_plan or preparation is not None) as invocation:
             snapshot = await self._graph.aget_state(config)
             # 旧拓扑的待执行节点不能静默跳过或映射；保留历史并明确拒绝。
-            if set(snapshot.next) - {"prepare_plan", "task_execution", "observation", "replanning"}:
+            if set(snapshot.next) - {"prepare_plan", "task_execution", "observation"}:
                 raise ledger.LedgerIntegrityError("检查点包含旧拓扑节点，需要显式迁移后恢复")
-            await validate_checkpoint(snapshot.values, invocation, sessions=self._sessions, runtime=context)
+            from risk_platform.workflow.planning import current_round_call
+            root = InvestigationInvocation(runtime=context, execution=invocation)
+            active = await current_round_call(snapshot.values, root, sessions=self._sessions)
+            await validate_checkpoint(snapshot.values, active.execution, sessions=self._sessions, runtime=active.runtime)
             if snapshot.values and not snapshot.next:
                 if not snapshot.values.get("round_complete"):
-                    raise ledger.LedgerIntegrityError("checkpoint 已结束但首轮事实未完成")
+                    raise ledger.LedgerIntegrityError("checkpoint 已结束但调查推进尚未完成")
                 output = snapshot.values
             else:
-                initial = None if snapshot.values else to_checkpoint_data(dict(checkpoint_schema_version=2, run_id=run_id, plan_id=plan_id,
+                initial = None if snapshot.values else to_checkpoint_data(dict(checkpoint_schema_version=3, run_id=run_id, plan_id=plan_id,
                     planning_input=context.investigation.planning_input))
                 output = await self._graph.ainvoke(initial, config, context=InvestigationInvocation(runtime=context, execution=invocation), durability="sync")
-            await validate_checkpoint(output, invocation, sessions=self._sessions, runtime=context)
-            return dict(run_id=run_id, plan_id=plan_id,
+            active = await current_round_call(output, root, sessions=self._sessions)
+            await validate_checkpoint(output, active.execution, sessions=self._sessions, runtime=active.runtime)
+            return dict(run_id=active.execution.identity.run_id, plan_id=output["plan_id"],
                 planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
                 investigation_plan=InvestigationPlan.model_validate(output["investigation_plan"]),
                 task_execution_results=[TaskExecutionResult.model_validate(row) for row in output["task_execution_results"]],
-                observation=read_observation(output["observation"]), round_complete=True, investigation_status="OPEN")
+                observation=read_observation(output["observation"]), round_complete=True, investigation_status="OPEN",
+                **({"stop_reason": output["stop_reason"]} if output.get("stop_reason") else {}),
+                **({"root_run_id": run_id} if active.execution.identity.run_id != run_id else {}))
+# [`current_round_call()` (line 181)]：沿数据库中的正式后继关系，确定检查点目前处于哪一轮，不能只相信 State 写的运行 ID。
+# [`validate_checkpoint()` (line 69)]：核对正式计划、执行结果、Observation 等是否与账本一致。
+
+# 校验调用上下文与恢复策略
+#     ↓
+# 鉴权，查找已有规划／运行身份
+#     ↓
+# 取得运行锁，建立本次执行控制
+#     ↓
+# 读取并核验检查点
+#     ├─ 已结束：复用结果
+#     ├─ 未开始：提交初始 State，运行图
+#     └─ 已中断：从检查点继续
+#     ↓
+# 再次与账本对账，返回结果
+#     ↓
+# 释放运行锁

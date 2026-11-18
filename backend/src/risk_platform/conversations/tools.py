@@ -1,6 +1,8 @@
 """入口工具的固定声明和模型输出校验；本阶段不执行工具或提供授权。"""
 import json
 from types import MappingProxyType
+from langchain_core.messages import AIMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from .contracts import ChatDraft, ProgressReadArguments, StartInvestigationArguments, ToolInvocation
 
@@ -8,11 +10,13 @@ from .contracts import ChatDraft, ProgressReadArguments, StartInvestigationArgum
 _ENTRY_TOOLS = MappingProxyType({
     "get_investigation_progress": (
         ProgressReadArguments,
-        "查询一个明确案件的当前进度。实时案件状态必须通过该工具读取，不能凭记忆回答；需要当前 READ 权限。",
+        "查询一个明确案件的当前进度。只填写必需的 investigation_id。"
+        "实时案件状态必须通过该工具读取，不能凭记忆回答；需要当前 READ 权限。",
     ),
     "start_investigation": (
         StartInvestigationArguments,
-        "用户明确要求对指定模型启动新调查时提出请求。咨询、否定、假设或目标不明时不得调用。"
+        "用户明确要求对指定模型启动新调查时提出请求。只填写必需的 model_id。"
+        "咨询、否定、假设或目标不明时不得调用。"
         "这只是建议，服务器须取得用户显式确认并鉴权后才执行；不能表示已创建案件。",
     ),
 })
@@ -24,12 +28,12 @@ def entry_tool_declarations(names=ENTRY_TOOL_NAMES):
     names = tuple(names)
     if len(set(names)) != len(names) or any(name not in _ENTRY_TOOLS for name in names):
         raise ValueError("入口工具未注册或重复")
-    return [{"type": "function", "function": {
-        # DeepSeek server-side strict requires /beta; standard endpoint relies on
-        # the full local parser/target gate below, as investigation tools already do.
-        "name": name, "description": _ENTRY_TOOLS[name][1], "strict": False,
-        "parameters": _ENTRY_TOOLS[name][0].model_json_schema(),
-    }} for name in names]
+    declarations = []
+    for name in names:
+        declaration = convert_to_openai_tool(_ENTRY_TOOLS[name][0])
+        declaration["function"].update(name=name, description=_ENTRY_TOOLS[name][1])
+        declarations.append(declaration)
+    return declarations
 
 
 def _json_object(text):
@@ -51,39 +55,25 @@ def _json_object(text):
     return value
 
 
-def parse_entry_decision(response, *, offered_names):
+def parse_entry_decision(message: AIMessage, *, offered_names):
     """只接受完整回答或一个原生 function call；绝不从正文执行工具。"""
     offered_names = tuple(offered_names)
     entry_tool_declarations(offered_names)  # 验证本次提供列表本身。
-    choices = getattr(response, "choices", None)
-    if not isinstance(choices, (list, tuple)) or len(choices) != 1:
-        raise ValueError("模型必须返回一个完整选择")
-    choice = choices[0]
-    finish_reason = getattr(choice, "finish_reason", None)
-    message = getattr(choice, "message", None)
-    if message is None or getattr(message, "refusal", None):
+    finish_reason = message.response_metadata.get("finish_reason")
+    if message.additional_kwargs.get("refusal") or message.invalid_tool_calls:
         raise ValueError("模型没有可用决策")
-    # 不支持旧 function_call 字段或非原生调用格式。
-    if getattr(message, "function_call", None) is not None:
-        raise ValueError("不接受旧 function_call 响应")
-    calls = getattr(message, "tool_calls", None)
-    if calls is None:
-        calls = []
-    if not isinstance(calls, (list, tuple)):
-        raise ValueError("tool_calls 必须是原生调用列表")
-    content = getattr(message, "content", None)
+    calls, content = message.tool_calls, message.content
     if calls:
         if finish_reason != "tool_calls" or len(calls) != 1:
             raise ValueError("工具响应不完整或包含多个调用")
         if content is not None and (not isinstance(content, str) or content.strip()):
             raise ValueError("不能同时输出正文和工具调用")
         call = calls[0]
-        function = getattr(call, "function", None)
-        name = getattr(function, "name", None)
-        if getattr(call, "type", None) != "function" or name not in offered_names:
+        name = call["name"]
+        if name not in offered_names:
             raise ValueError("工具未提供或不是 function call")
-        arguments = _ENTRY_TOOLS[name][0].model_validate(_json_object(getattr(function, "arguments", None)))
-        return ToolInvocation(call_id=getattr(call, "id", None), name=name, arguments=arguments)
+        arguments = _ENTRY_TOOLS[name][0].model_validate(call["args"])
+        return ToolInvocation(call_id=call["id"], name=name, arguments=arguments)
     if finish_reason != "stop":
         raise ValueError("模型回答未正常结束")
     draft = ChatDraft.model_validate(_json_object(content))

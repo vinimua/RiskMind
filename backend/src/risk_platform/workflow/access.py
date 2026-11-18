@@ -132,7 +132,7 @@ async def _check_registered_operation(session, value, context):
         if definition.execution_limits(context) != recorded:
             raise InvestigationAccessError("工具范围或输入限制已变化，不能沿用原记录")
         if value.candidate_request is not None:
-            request = definition.request_model.model_validate(value.candidate_request)
+            request = definition.tool.args_schema.model_validate(value.candidate_request)
             definition.validate_request(context, request)
     if value.operation_type == OperationType.OBSERVATION:
         for result in await ledger._observation_results(session, value):

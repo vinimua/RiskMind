@@ -1,44 +1,55 @@
-"""显式工具白名单：声明给模型看，执行仍进入已有受控适配器。
+"""注册 StructuredTool 及其结果协议；模型绑定与实际执行共用同一工具。
 
-不动态导入、不自行调度、不自动重试。当前只登记 knowledge_search。
+不动态导入、不自行调度、不自动重试；注册不等于本次运行绑定或授权。
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from uuid import uuid4
 import hashlib
 import json
 from types import MappingProxyType
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 
 from pydantic import BaseModel
+from langchain_core.tools import StructuredTool
+from langchain_core.runnables import RunnableConfig
+from langchain_core.messages import AIMessage
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from risk_platform.execution import knowledge
-from risk_platform.execution.contracts import ExecutionError, KnowledgeSearchToolRequest, KnowledgeExecutionPayload, TaskExecutionResult
+from risk_platform.execution import knowledge, csv_statistics
+from risk_platform.execution.contracts import CsvStatisticsRequest, CsvStatisticsPayload, CsvStatisticsReference
+from risk_platform.execution.contracts import KnowledgeSearchToolRequest, KnowledgeExecutionPayload, TaskExecutionResult
 from risk_platform.workflow.contracts import CapabilityType
 from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime
 
 
-async def _knowledge_handler(task, request, *, runtime_context):
+async def knowledge_search(config: RunnableConfig, **arguments):
+    # RunnableConfig 由执行节点注入，身份和客户端不出现在模型参数中。
+    runtime_context = config["configurable"]["runtime"]
+    task = config["configurable"]["task"]
+    check_runtime(runtime_context, InvestigationAction.CONTINUE)
+    request = KnowledgeSearchToolRequest.model_validate(arguments)
+    _knowledge_validate_request(runtime_context, request)
     # 只有实际进入这个工具适配器，才获取它的范围与独立授权函数。
-    from risk_platform.workflow.knowledge_tool import knowledge_execution, knowledge_authorizer, knowledge_tool
+    from risk_platform.workflow.knowledge_tool import knowledge_tool
     binding = knowledge_tool(runtime_context)
-    trusted = knowledge_execution(runtime_context, InvestigationAction.CONTINUE)
-    return await knowledge.execute_knowledge_search(task, request, context=trusted,
-        authorize=knowledge_authorizer(runtime_context), session_factory=binding.session_factory,
+    trusted = binding.execution_context(runtime_context.timeout_seconds)
+    result = await knowledge.execute_knowledge_search(task, request, context=trusted,
+        authorize=binding.authorizer(runtime_context), session_factory=binding.session_factory,
         embedding_client=binding.embedding_client, milvus_client=binding.milvus_client)
+    return TaskExecutionResult.model_validate(result.model_dump() | {
+        "tool_name": "knowledge_search", "result_version": "1"})
 
 
 def _knowledge_execution_limits(runtime):
-    from risk_platform.workflow.knowledge_tool import knowledge_execution
-    trusted = knowledge_execution(runtime, InvestigationAction.CONTINUE)
+    from risk_platform.workflow.knowledge_tool import knowledge_tool
+    trusted = knowledge_tool(runtime).execution
     return {"max_top_k": trusted.max_top_k, "scope": trusted.scope.model_dump(mode="json"),
             "index_profile": trusted.index_profile.value}
 
 
 def _knowledge_validate_request(runtime, request):
-    from risk_platform.workflow.knowledge_tool import knowledge_execution
-    if request.top_k > knowledge_execution(runtime, InvestigationAction.CONTINUE).max_top_k:
+    from risk_platform.workflow.knowledge_tool import knowledge_tool
+    if request.top_k > knowledge_tool(runtime).execution.max_top_k:
         raise ValueError("工具请求数量超过本次允许上限")
 
 
@@ -64,11 +75,8 @@ class ToolUnavailableError(PermissionError):
 
 @dataclass(frozen=True)
 class ToolDefinition:
-    name: str
+    tool: StructuredTool
     capability: CapabilityType
-    description: str
-    request_model: type[BaseModel]
-    handler: Callable[..., Awaitable[TaskExecutionResult]]
     # 本次执行的公开范围与限制，随阶段输入固定；不包含客户端、凭证或权限函数。
     execution_limits: Callable[[InvestigationRuntimeContext], dict]
     validate_request: Callable[[InvestigationRuntimeContext, BaseModel], None]
@@ -85,25 +93,17 @@ class ToolDefinition:
 
     def __post_init__(self):
         if not all(callable(function) for function in (
-            self.handler, self.execution_limits, self.validate_request,
+            self.execution_limits, self.validate_request,
             self.to_observation_items, self.validate_reference,
             self.authorize_result, self.validate_result,
         )):
             raise TypeError("工具执行、投影和校验字段必须是函数")
         if not all(isinstance(model, type) and issubclass(model, BaseModel) for model in (
-            self.request_model, self.result_model, self.reference_model,
+            self.tool.args_schema, self.result_model, self.reference_model,
         )):
             raise TypeError("工具参数、结果和引用协议必须是 Pydantic 模型类")
-        if self.name != "knowledge_search" and "reference_id" not in self.reference_model.model_fields:
+        if self.tool.name != "knowledge_search" and "reference_id" not in self.reference_model.model_fields:
             raise ValueError("通用引用协议必须包含结果项 reference_id")
-
-    def declaration(self) -> dict:
-        # 不把 actor、scope、profile、策略函数或 handler 暴露给模型。
-        # 不依赖供应商 strict JSON Schema 支持；本地仍必须完整校验。
-        return {"type": "function", "function": {
-            "name": self.name, "description": self.description,
-            "parameters": self.request_model.model_json_schema(), "strict": False,
-        }}
 
 # 模型选择后怎么校验
 # 链路是：
@@ -116,7 +116,7 @@ class ToolDefinition:
 # - 返回的是完整的原生 tool_calls；
 # - 必须且只能有一次 function call；
 # - 工具已注册、能力匹配，并在本次提供列表中；
-# - 参数是合法 JSON，符合该工具的请求模型。
+# - 参数已由 LangChain 解析为字典，符合该工具的请求模型。
 # validate_tool_call() 再结合当前 runtime 检查：
 # 当前运行权限与绑定
 # → 工具仍然可用
@@ -125,9 +125,13 @@ class ToolDefinition:
 # 没有把普通模型正文当成工具调用，也没有 query = task.objective 的兜底。
 
 KNOWLEDGE_SEARCH = ToolDefinition(
-    name="knowledge_search", capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
-    description="检索带来源的历史案例和模型背景，返回知识线索；不能确认当前案件根因，也不能执行写操作。",
-    request_model=KnowledgeSearchToolRequest, handler=_knowledge_handler,
+    capability=CapabilityType.KNOWLEDGE_RETRIEVAL,
+    tool=StructuredTool.from_function(
+        coroutine=knowledge_search, name="knowledge_search",
+        args_schema=KnowledgeSearchToolRequest, infer_schema=False,
+        description="检索带来源的历史案例和模型背景，返回知识线索；query、top_k 必填，filters 可选。"
+                    "只填写这些检索参数；不能确认当前案件根因，也不能执行写操作。",
+    ),
     execution_limits=_knowledge_execution_limits, validate_request=_knowledge_validate_request,
     result_model=KnowledgeExecutionPayload,
     to_observation_items=knowledge.observation_items,
@@ -136,14 +140,22 @@ KNOWLEDGE_SEARCH = ToolDefinition(
     reference_model=knowledge.KnowledgeReference,
     validate_result=knowledge.validate_result,
 )
-TOOL_DEFINITIONS = MappingProxyType({KNOWLEDGE_SEARCH.name: KNOWLEDGE_SEARCH})
-
-
-def tool_declarations(capability: CapabilityType, *, names=None) -> list[dict]:
-    declarations = [tool.declaration() for tool in TOOL_DEFINITIONS.values() if tool.capability == capability and (names is None or tool.name in names)]
-    if not declarations:
-        raise ValueError("当前任务没有已注册的可用工具")
-    return declarations
+CSV_SAMPLE_STATISTICS = ToolDefinition(
+    capability=CapabilityType.COMPUTATION,
+    tool=StructuredTool.from_function(
+        coroutine=csv_statistics.sample_statistics, name="csv_sample_statistics",
+        args_schema=CsvStatisticsRequest, infer_schema=False,
+        description="只读授权的离线 CSV，按左闭右开时间窗口统计申请数、坏标签占比或字段缺失率。"
+                    "dataset_id、statistic、window_start、window_end 必填；仅 MISSING_RATE 必须填写 field。"
+                    "不填写 query、top_k、filters 或案件入口参数。"
+                    "不计算模型 KS/AUC，不证明标签成熟、线上坏账率或异常根因。",
+    ),
+    execution_limits=csv_statistics.execution_limits, validate_request=csv_statistics.validate_request,
+    result_model=CsvStatisticsPayload, to_observation_items=csv_statistics.observation_items,
+    reference_model=CsvStatisticsReference, validate_reference=csv_statistics.validate_reference,
+    authorize_result=csv_statistics.authorize_result, validate_result=csv_statistics.validate_result,
+)
+TOOL_DEFINITIONS = MappingProxyType({tool.tool.name: tool for tool in (KNOWLEDGE_SEARCH, CSV_SAMPLE_STATISTICS)})
 
 
 def tool_definition(name: str) -> ToolDefinition:
@@ -158,7 +170,7 @@ def available_tools(capability: CapabilityType, runtime: InvestigationRuntimeCon
     if not matches:
         raise ToolUnavailableError("UNSUPPORTED_CAPABILITY")
     bound = {tool.name for tool in runtime.tools}
-    available = tuple(tool for tool in matches if tool.name in bound)
+    available = tuple(tool for tool in matches if tool.tool.name in bound)
     if not available:
         raise ToolUnavailableError("TOOL_NOT_BOUND")
     return available
@@ -166,75 +178,28 @@ def available_tools(capability: CapabilityType, runtime: InvestigationRuntimeCon
 
 def validate_tool_call(call: ToolCall, capability: CapabilityType, runtime: InvestigationRuntimeContext) -> ToolCall:
     check_runtime(runtime, InvestigationAction.CONTINUE)
-    available = {tool.name: tool for tool in available_tools(capability, runtime)}
+    available = {tool.tool.name: tool for tool in available_tools(capability, runtime)}
     if not isinstance(call, ToolCall) or not isinstance(call.tool_name, str) or call.tool_name not in available:
         raise ValueError("选择的工具未注册、能力不符或本次未绑定")
     definition = available[call.tool_name]
     arguments = call.arguments.model_dump(mode="json") if isinstance(call.arguments, BaseModel) else call.arguments
-    request = definition.request_model.model_validate(arguments)
+    request = definition.tool.args_schema.model_validate(arguments)
     definition.validate_request(runtime, request)
     return ToolCall(call.tool_name, request)
+# 它返回校验后的工具名和参数，不执行工具，也不保存数据库。
 
 
-def parse_tool_choice(choice, capability: CapabilityType, *, allowed_names=None) -> ToolCall:
-    """只接受一次原生 function call；不解析普通正文，也不回退到 objective。"""
-    if getattr(choice, "finish_reason", None) != "tool_calls":
+def parse_tool_choice(message: AIMessage, capability: CapabilityType, *, allowed_names) -> ToolCall:
+    """读取 LangChain 的标准调用，交给所选工具校验业务参数。"""
+    if message.response_metadata.get("finish_reason") != "tool_calls" or message.invalid_tool_calls:
         raise ValueError("工具选择未完整返回原生调用")
-    calls = getattr(choice.message, "tool_calls", None)
-    if not isinstance(calls, list) or len(calls) != 1:
+    if len(message.tool_calls) != 1:
         raise ValueError("每个任务必须且只能提出一次工具调用")
-    call = calls[0]
-    if getattr(call, "type", None) != "function":
-        raise ValueError("只接受已注册的 function 工具")
-    function = getattr(call, "function", None)
-    name = getattr(function, "name", None)
-    if not isinstance(name, str) or name not in TOOL_DEFINITIONS:
-        raise ValueError("模型选择了未注册工具")
-    definition = TOOL_DEFINITIONS[name]
-    if definition.capability != capability or (allowed_names is not None and name not in allowed_names):
+    call = message.tool_calls[0]
+    definition = tool_definition(call["name"])
+    if definition.capability != capability or call["name"] not in allowed_names:
         raise ValueError("工具与正式任务能力或本次绑定不匹配")
-    arguments = getattr(function, "arguments", None)
-    if not isinstance(arguments, str):
-        raise ValueError("工具参数必须为 JSON 字符串")
-    return ToolCall(name, definition.request_model.model_validate_json(arguments))
-
-
-async def execute_registered_tool(name: str, task, request, *, runtime_context) -> TaskExecutionResult:
-    """白名单分派不是授权；handler 内仍做专用参数、scope、权限和结果校验。"""
-    code = None
-    if not isinstance(name, str) or name not in TOOL_DEFINITIONS:
-        code = "UNKNOWN_TOOL"
-    elif TOOL_DEFINITIONS[name].capability != task.capability:
-        code = "UNSUPPORTED_CAPABILITY"
-    if code is not None:
-        now = datetime.now(timezone.utc)
-        return TaskExecutionResult(execution_id="exec-" + uuid4().hex, task_id=task.task_id,
-            capability=task.capability, status="REJECTED", started_at=now, completed_at=now,
-            error=ExecutionError(category="VALIDATION", code=code,
-                message="工具未注册或不支持当前任务能力", retryable=False))
-    check_runtime(runtime_context, InvestigationAction.CONTINUE)
-    if not any(tool.name == name for tool in runtime_context.tools):
-        now = datetime.now(timezone.utc)
-        return TaskExecutionResult(execution_id="exec-" + uuid4().hex, task_id=task.task_id,
-            capability=task.capability, status="REJECTED", started_at=now, completed_at=now,
-            error=ExecutionError(category="AUTHORIZATION", code="TOOL_NOT_BOUND",
-                message="本次运行未绑定所选工具", retryable=False))
-    definition = TOOL_DEFINITIONS[name]
-    request = definition.request_model.model_validate(request.model_dump() if isinstance(request, BaseModel) else request)
-    definition.validate_request(runtime_context, request)
-    result = await definition.handler(task, request, runtime_context=runtime_context)
-    result = TaskExecutionResult.model_validate_json(result.model_dump_json())
-    if result.task_id != task.task_id or result.capability != task.capability:
-        raise ValueError("工具结果与正式任务身份不一致")
-    if result.tool_name is not None and result.tool_name != name:
-        raise ValueError("工具返回了其他工具的结果")
-    if name != "knowledge_search":
-        result = TaskExecutionResult.model_validate(result.model_dump() | {
-            "tool_name": name, "result_version": definition.result_version})
-    if result.payload is not None and name != "knowledge_search":
-        payload = definition.result_model.model_validate(result.payload.model_dump() if isinstance(result.payload, BaseModel) else result.payload)
-        definition.validate_result(request, definition.execution_limits(runtime_context), payload)
-    return result
+    return ToolCall(call["name"], definition.tool.args_schema.model_validate(call["args"]))
 
 
 def required_tool_options() -> dict:
@@ -248,8 +213,9 @@ def required_tool_options() -> dict:
 
 def query_contract_digest(prompt: str, *, capability=CapabilityType.KNOWLEDGE_RETRIEVAL, names=None) -> str:
     """工具声明和调用协议也是模型输入的一部分，必须参与恢复规格摘要。"""
-    payload = {"protocol": "bound-tool-function-call/v3", "system_prompt": prompt,
-               "tools": tool_declarations(capability, names=names),
+    payload = {"protocol": "langchain-structured-tool/v6", "system_prompt": prompt,
+               "tools": [convert_to_openai_tool(d.tool) for d in TOOL_DEFINITIONS.values()
+                         if d.capability == capability and (names is None or d.tool.name in names)],
                **required_tool_options()}
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()

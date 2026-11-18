@@ -154,7 +154,8 @@ def test_persisted_first_run_uses_shared_loop_and_resume_reuses_results(database
     retrieval(monkeypatch, agent)
     calls = []
     async def shared(*args, **kwargs):
-        assert kwargs["execute_phase"] is not None
+        assert kwargs["query_phase"] is not None
+        assert kwargs["tool_phase"] is not None
         calls.append("shared-loop")
         return await nodes.task_execution(*args, **kwargs)
     monkeypatch.setattr(graph_module, "task_execution", shared)
@@ -197,7 +198,7 @@ def test_fresh_and_interrupted_resume_use_same_explicit_invocation_contract(data
             with pytest.raises(ProcessLost):
                 await runner.ainvoke(plan_id="P", context=public)
             output = await runner.ainvoke(plan_id="P", context=public)
-            assert calls[0]["checkpoint_schema_version"] == 2 and calls[1] is None
+            assert calls[0]["checkpoint_schema_version"] == 3 and calls[1] is None
             assert public.execution is None  # 内部 claim 不回填到调用方上下文。
             assert output["round_complete"] and agent.events.count("query:T0") == 1
     asyncio.run(scenario())
@@ -252,25 +253,19 @@ def test_old_topology_pending_node_is_rejected_before_external_call(database, mo
     asyncio.run(scenario())
 
 
-def test_recovery_uses_shared_replanning_and_topology(database, monkeypatch):
-    from risk_platform.workflow import graph as graph_module
+def test_recovery_uses_shared_observation_routing_and_topology(database, monkeypatch):
     agent = Agent()
     retrieval(monkeypatch, agent)
-    calls = []
-    original = graph_module.replanning
-    def shared_replanning(state):
-        calls.append(state["observation"])
-        return original(state)
-    monkeypatch.setattr(graph_module, "replanning", shared_replanning)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions)
-            assert set(runner._graph.get_graph().nodes) == {
-                "__start__", "prepare_plan", "task_execution", "observation", "replanning", "__end__",
+            topology = runner._graph.get_graph()
+            assert set(topology.nodes) == {
+                "__start__", "prepare_plan", "task_execution", "observation", "__end__",
             }
             result = await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=await context(sessions)))
             assert result["round_complete"] and result["investigation_status"] == "OPEN"
-            assert len(calls) == 1 and calls[0]["status"] == "SUCCEEDED"
+            assert result["stop_reason"]
     asyncio.run(scenario())
 
 
@@ -292,7 +287,7 @@ def test_old_checkpoint_version_is_rejected_without_reexecuting(database, monkey
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("stage", ["QUERY_FORMULATION", "KNOWLEDGE_EXECUTION", "OBSERVATION"])
+@pytest.mark.parametrize("stage", ["QUERY_FORMULATION", "TOOL_EXECUTION", "OBSERVATION"])
 def test_crash_after_phase_commit_before_node_checkpoint_reuses_exact_artifact(database, monkeypatch, stage):
     agent = Agent()
     retrieval(monkeypatch, agent)
@@ -480,22 +475,57 @@ def test_lost_lock_connection_fences_old_worker_after_new_generation_finishes(da
     asyncio.run(scenario())
 
 
+def test_legacy_stage_is_preserved_and_blocks_new_execution(database, monkeypatch):
+    from risk_platform.workflow.persistence.models import OperationRow
+    agent = Agent()
+    retrieval(monkeypatch, agent)
+
+    async def scenario():
+        async with resources(database, agent, setup=True) as (sessions, saver, runner):
+            await seed(sessions, 1)
+            runtime = await context(sessions)
+            value = BusinessOperationInput(investigation_id="I", round_id="R", plan_id="P", task_id="T0",
+                operation_type="QUERY_FORMULATION", model_name=agent.model,
+                prompt_version=query_contract_digest(KNOWLEDGE_QUERY_SYSTEM_PROMPT), max_top_k=20)
+            async with sessions.begin() as session:
+                key = await access.register_authorized_operation(session, value, context=runtime)
+                await access.start_authorized_attempt(session, key, "old-query", context=runtime)
+                await ledger.commit_result(session, "old-query", "old-result",
+                    PhaseArtifact(query_request=KnowledgeSearchToolRequest(query="old query", top_k=1)))
+            async with sessions() as session:
+                before = (await session.get(OperationRow, key)).payload
+            with pytest.raises(recovery.RecoveryBlockedError, match="explicit migration"):
+                await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=runtime))
+            assert not agent.events
+            async with sessions() as session:
+                assert (await session.get(OperationRow, key)).payload == before
+                assert len(list(await session.scalars(select(ResultRow)))) == 1
+
+    asyncio.run(scenario())
+
+
 def test_multiple_committed_results_require_explicit_immutable_selection(database, monkeypatch):
+    from risk_platform.execution.tools import KNOWLEDGE_SEARCH
+    from risk_platform.workflow.persistence.business_inputs import ToolOperationInput
+    from risk_platform.workflow.persistence.recovery_contracts import ToolArtifact, RegisteredCall
     agent = Agent()
     retrieval(monkeypatch, agent)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed(sessions, 1)
             a = await context(sessions)
-            value = BusinessOperationInput(investigation_id="I", round_id="R", plan_id="P", task_id="T0",
+            value = ToolOperationInput(investigation_id="I", round_id="R", plan_id="P", task_id="T0",
                 operation_type="QUERY_FORMULATION", model_name=agent.model,
-                prompt_version=query_contract_digest(KNOWLEDGE_QUERY_SYSTEM_PROMPT), max_top_k=20)
+                capability="KNOWLEDGE_RETRIEVAL",
+                prompt_version=query_contract_digest(KNOWLEDGE_QUERY_SYSTEM_PROMPT),
+                tool_limits={"knowledge_search": KNOWLEDGE_SEARCH.execution_limits(a)})
             async with sessions.begin() as session:
                 key = await access.register_authorized_operation(session, value, context=a)
                 for index in (1, 2):
                     await access.start_authorized_attempt(session, key, f"legacy-query-{index}", context=a, retry=index > 1)
                     await ledger.commit_result(session, f"legacy-query-{index}", f"legacy-result-{index}",
-                        PhaseArtifact(query_request=KnowledgeSearchToolRequest(query="Query T0", top_k=1)))
+                        ToolArtifact(query_request=RegisteredCall(tool_name="knowledge_search",
+                            arguments=KnowledgeSearchToolRequest(query="Query T0", top_k=1).model_dump(mode="json"))))
             with pytest.raises(recovery.RecoveryBlockedError, match="多份已提交"):
                 await runner.ainvoke(plan_id="P", context=InvestigationInvocation(runtime=a))
             assert not agent.events
@@ -579,7 +609,7 @@ retrieval(pytest.MonkeyPatch(), agent)
 original = phase_execution._phase
 async def crash(*args, **kwargs):
     value = await original(*args, **kwargs)
-    if args[2].operation_type == "KNOWLEDGE_EXECUTION" and args[2].task_id == "T0":
+    if args[2].operation_type == "TOOL_EXECUTION" and args[2].task_id == "T0":
         os._exit(23)
     return value
 phase_execution._phase = crash

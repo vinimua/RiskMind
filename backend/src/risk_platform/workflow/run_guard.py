@@ -59,6 +59,9 @@ class RunExecutionContext:
     identity: RunIdentity
     policy: RecoveryPolicy
     guard: RunGuard
+    max_rounds: int = 3
+    max_tasks: int = 24
+    max_duration_seconds: float = 300.0
 # identity           本次运行身份，不包含阶段配置
 # policy             重试与历史结果选择规则
 # guard              运行权检查
@@ -73,7 +76,7 @@ class RunExecutionContext:
 #     ↓
 # 把包装传给 LangGraph
 #     ↓
-# 节点通过 require_run_context(runtime) 取出并检查
+# 节点通过 require_invocation(runtime.context, claimed=True) 取出并检查
 @asynccontextmanager
 async def _claim(engine, sessions, identity, context, policy, *, allow_planning=False):
     # 专用自动提交连接持会话锁；外部调用期间不持长数据库事务/行锁。
@@ -84,6 +87,11 @@ async def _claim(engine, sessions, identity, context, policy, *, allow_planning=
             "pg_try_advisory_lock(hashtextextended(:key,0))"), {"key": f"riskmind:first-round:{identity.run_id}"})).one()
         if not acquired:
             raise RecoveryBlockedError("同一轮正在运行，拒绝并发接续")
+        # 整个循环持有案件锁；其他入口即使持有后继轮次身份也不能并发推进。
+        case_acquired = (await connection.execute(text("SELECT pg_try_advisory_lock(hashtextextended(:key,0))"),
+            {"key": f"riskmind:investigation:{identity.investigation_id}"})).scalar_one()
+        if not case_acquired:
+            raise RecoveryBlockedError("同一调查正在运行，拒绝并发推进")
         async with sessions.begin() as session:
             trusted = await authorize_run(session, context)
             plan_row = await session.get(AcceptedPlanRow, identity.plan_id)

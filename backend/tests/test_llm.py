@@ -35,12 +35,15 @@ def test_empty_base_url_uses_deepseek_default(monkeypatch,value):
 
 
 def test_agents_share_one_client_and_explicit_model(monkeypatch):
-    calls=[];client=object()
+    calls=[];client=SimpleNamespace(api_key="test",base_url="https://example.test",chat=SimpleNamespace(completions=object()))
     monkeypatch.setenv("DEEPSEEK_MODEL"," deepseek-flash ")
     monkeypatch.setattr(llm,"create_llm_client",lambda:calls.append(1) or client)
+    tool_model = object()
+    monkeypatch.setattr(llm,"ChatOpenAI",lambda **kwargs:tool_model)
     chat,investigation=llm.create_llm_agents()
-    assert chat.client is investigation.client is client and calls==[1]
+    assert investigation.client is client and calls==[1]
     assert chat.model==investigation.model=="deepseek-flash"
+    assert chat.tool_model is investigation.tool_model is tool_model
 
 
 @pytest.mark.parametrize("value", [None, "", "   "])

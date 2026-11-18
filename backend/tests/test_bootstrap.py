@@ -13,6 +13,24 @@ def settings():
         allowed_model_ids=("M",),knowledge_profile="parent-child-v1")
 
 
+def test_planning_capabilities_have_no_default():
+    from risk_platform.entrypoints import EntryServices
+    from risk_platform.workflow.contracts import UserQuery
+    dependencies = dict(sessions=None, runner=None, chat_agent=None,
+                        authorize_resource=lambda *_: True, authorize_conversation=lambda *_: True)
+    source = dict(user_query=UserQuery(query="test", model_id="M"))
+    services = EntryServices(**dependencies, tools_for=lambda *_: ())
+    assert services._planning_source("actor", **source).available_capabilities == []
+    services = EntryServices(**dependencies, tools_for=lambda *_: (NS(name="unregistered"),))
+    with pytest.raises(ValueError, match="工具未注册"):
+        services._planning_source("actor", **source)
+    def denied(*_):
+        raise PermissionError("denied")
+    services = EntryServices(**dependencies, tools_for=denied)
+    with pytest.raises(PermissionError, match="denied"):
+        services._planning_source("actor", **source)
+
+
 def configure(monkeypatch):
     for key,value in {"RISK_LOCAL_MODE":"1","RISK_LOCAL_ACTOR_ID":"local-user",
         "RISK_LOCAL_API_TOKEN":"test-token-"+"a"*32,"RISK_ALLOWED_MODEL_IDS":'["M"]',
@@ -101,7 +119,8 @@ def test_service_ownership_must_be_unambiguous():
         create_app(entry_services=NS(),services_context=lambda:None)
 
 
-def test_resource_ownership_and_cleanup_on_partial_startup(monkeypatch):
+@pytest.mark.parametrize("csv_enabled", [False, True])
+def test_resource_ownership_and_cleanup_on_partial_startup(monkeypatch, csv_enabled):
     import openai
     from risk_platform.knowledge import milvus
     events=[]
@@ -129,28 +148,42 @@ def test_resource_ownership_and_cleanup_on_partial_startup(monkeypatch):
     monkeypatch.setenv("SILICONFLOW_API_KEY","embedding-key")
     monkeypatch.setenv("MILVUS_URI","http://localhost:19530")
     monkeypatch.setattr(bootstrap,"get_database_url",lambda:"postgresql+psycopg://unused")
-    monkeypatch.setattr(bootstrap,"create_llm_agents",lambda:(NS(client=NS(close=lambda:events.append("llm-close"))),object()))
+    async def close_tool_model(): events.append("tool-model-close")
+    monkeypatch.setattr(bootstrap,"create_llm_agents",lambda:(NS(),
+        NS(client=NS(close=lambda:events.append("llm-close")),tool_model=NS(root_async_client=NS(close=close_tool_model)))))
     monkeypatch.setattr(bootstrap,"create_async_engine",lambda *a,**kw:Engine())
     monkeypatch.setattr(bootstrap,"async_sessionmaker",lambda *a,**kw:object())
     monkeypatch.setattr(bootstrap,"postgres_checkpointer",saver)
     monkeypatch.setattr(bootstrap,"InvestigationRunner",Runner)
     monkeypatch.setattr(openai,"AsyncOpenAI",lambda **kw:NS(close=close_embedding))
     monkeypatch.setattr(milvus,"get_client",fake_milvus)
+    config = settings()
+    if csv_enabled:
+        from risk_platform.execution.csv_statistics import CsvDataset
+        config = config.model_copy(update={"csv_datasets": (CsvDataset(
+            dataset_id="train", model_id="M", path="unused.csv", sha256="a" * 64,
+            timezone_offset="+08:00", window_start="2025-09-01T00:00:00+08:00",
+            window_end="2026-01-01T00:00:00+08:00"),)})
     async def scenario():
-        async with bootstrap.local_services(settings()) as services:
+        async with bootstrap.local_services(config) as services:
             from risk_platform.workflow.contracts import InitialPlanningInput,UserQuery
             source=InitialPlanningInput(user_query=UserQuery(query="test",model_id="M"),available_capabilities=["KNOWLEDGE_RETRIEVAL"])
-            tool,=services.tools_for("local-user",source)
+            bound = services.tools_for("local-user",source)
+            tool = bound[0]
+            assert [t.name for t in bound] == (["knowledge_search", "csv_sample_statistics"]
+                                              if csv_enabled else ["knowledge_search"])
+            planned = services._planning_source("local-user", user_query=source.user_query)
+            assert ("COMPUTATION" in planned.available_capabilities) == csv_enabled
             assert tool.execution.scope.model_id=="M" and tool.embedding_client is not None
             assert tool.milvus_client is not None and tool.session_factory is services.sessions
             with pytest.raises(PermissionError): services.tools_for("other",source)
     asyncio.run(scenario())
-    assert events==["saver-open","milvus-close","embedding-close","runner-close","saver-close","engine-close","llm-close"]
+    assert events==["saver-open","milvus-close","embedding-close","runner-close","saver-close","engine-close","tool-model-close","llm-close"]
     events.clear()
     def fail(uri): raise ConnectionError("private dependency error")
     monkeypatch.setattr(milvus,"get_client",fail)
     with pytest.raises(ConnectionError): asyncio.run(scenario())
-    assert events==["saver-open","embedding-close","runner-close","saver-close","engine-close","llm-close"]
+    assert events==["saver-open","embedding-close","runner-close","saver-close","engine-close","tool-model-close","llm-close"]
 
 
 def test_local_launcher_owns_loop_and_binds_loopback(monkeypatch):
