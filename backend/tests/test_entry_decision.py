@@ -1,5 +1,6 @@
 """入口模型只接受 LangChain AIMessage；不执行实际案件操作。"""
 import json
+import asyncio
 import pytest
 from langchain_core.messages import AIMessage
 from pydantic import ValidationError
@@ -11,13 +12,13 @@ from risk_platform.memory.contracts import AgentContext, MemoryScope
 from tool_model_helpers import ToolModelStub, tool_response
 
 
-def answer(content='{"answer":"回答","memory":{}}', finish="stop"):
+def answer(content='{"answer":"回答","memory_candidate":null}', finish="stop"):
     return AIMessage(content=content, response_metadata={"finish_reason": finish})
 
 
 def decide(model, **kwargs):
-    return ChatAgent("test", tool_model=model).decide("查询案件 case-001", history=[],
-        memory_context=AgentContext(scope=MemoryScope(kind="CONVERSATION", id="C")), **kwargs)
+    return asyncio.run(ChatAgent("test", tool_model=model).decide("查询案件 case-001", history=[],
+        memory_index=[], read_memory=None, **kwargs))
 
 
 def test_one_decision_binds_each_entry_tools_own_schema():
@@ -57,8 +58,8 @@ def test_explicit_target_is_user_data():
     model = ToolModelStub(answer())
     decide(model, investigation_id="case-001")
     messages = model.calls[0]["messages"]
-    assert messages[0][0] == "system" and messages[1][0] == "human"
-    assert json.loads(messages[1][1])["explicit_target"] == {"investigation_id": "case-001", "model_id": None}
+    assert messages[0].type == "system" and messages[1].type == "human"
+    assert json.loads(messages[1].content)["explicit_target"] == {"investigation_id": "case-001", "model_id": None}
     assert "显式确认" in ENTRY_DECISION_PROMPT
 
 

@@ -21,6 +21,17 @@ class PlanningRunRow(PayloadRow, Base):
     )
 
 
+class PlanningDialogueRow(PayloadRow, Base):
+    """Append-only planning catalogue, model replies and method reads; never case evidence."""
+    __tablename__ = "investigation_planning_dialogue"
+    run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["investigation_planning_runs.run_id"]),
+        CheckConstraint("sequence >= 0 AND schema_version = 1", name="ck_planning_dialogue_sequence"),
+    )
+
+
 class PlanningAttemptRow(Base):
     __tablename__ = "investigation_planning_attempts"
     attempt_id: Mapped[str] = mapped_column(String(128), primary_key=True)

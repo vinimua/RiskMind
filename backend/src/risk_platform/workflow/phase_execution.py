@@ -1,6 +1,8 @@
 """阶段持久化适配：构造操作输入、选择正式结果，并执行三段事务协议。"""
 
+import asyncio
 import hashlib
+import json
 import logging
 from risk_platform.agents.prompts import TOOL_SELECTION_SYSTEM_PROMPT, OBSERVATION_SYSTEM_PROMPT
 from risk_platform.memory.repository import capture_observation, context_for_stage
@@ -54,7 +56,7 @@ async def _selection(session, invocation, value, history, *, require=False):
     return fact.artifact
 
 
-async def _phase(sessions, invocation, value, produce, *, runtime):
+async def _phase(sessions, invocation, value, produce, *, runtime, recover=None, action_id=None):
     """执行或复用一个阶段：先查历史，再登记尝试，最后原子提交结果。
 
     sessions 是数据库会话工厂；runtime 携带可信身份；invocation 只携带恢复策略和运行锁检查器；
@@ -64,6 +66,12 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
     三个短事务之间不持有前一事务的行锁，但外层 _claim 的会话级运行锁仍然持有。
     sessions.begin() 正常退出时提交，异常退出时回滚；flush() 本身不代表提交。
     """
+    # 指标历史复用前重新向数据服务验证访问；网络等待不持有数据库事务。
+    if "query_model_metrics" in value.tool_limits:
+        from risk_platform.execution.metrics import binding, DefinitionRequest
+        async with asyncio.timeout(runtime.timeout_seconds):
+            await binding(runtime).client.call("list_metric_definitions",
+                DefinitionRequest(model_id=binding(runtime).model_id))
     # 事务 1：登记/核对操作，优先复用正式结果，否则结算旧运行留下的不确定尝试。
     async with sessions.begin() as session:
         # 恢复也要重新鉴权；曾经有权限，不代表当前仍有权读取和继续执行。
@@ -114,7 +122,7 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
         await invocation.guard.check(session)
         # 使用本事务重新读取的历史，包含事务 1 刚提交的 UNCERTAIN。
         history = await access.read_operation_history(session, value, context=runtime)
-        if any(fact.status == "UNCERTAIN" for fact in history or ()) and not invocation.policy.retry_uncertain:
+        if any(fact.status == "UNCERTAIN" for fact in history or ()) and not invocation.policy.retry_uncertain and recover is None:
             raise RecoveryBlockedError("存在不确定尝试，当前策略不允许再次调用外部服务")
         if any(fact.status == "FAILED" for fact in history or ()) and not invocation.policy.retry_failed_attempts:
             raise RecoveryBlockedError("存在失败尝试，当前策略不允许重试")
@@ -128,7 +136,7 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
     # STARTED 与本次 claim 已提交；未知中断不在此伪造 FAILED，也不自动重试。
     # 外部调用放在事务之外：等待模型/检索时，不一直占用上述事务和行锁。
     # 若这里抛错或进程退出，保留 STARTED，后续恢复再判断是否结算 UNCERTAIN。
-    artifact = await produce()
+    artifact = await (recover() if recover is not None and history else produce())
     # 事务 3：结果、Attempt.COMMITTED、本轮选定结果一起提交，任一失败则整体回滚。
     async with sessions.begin() as session:
         await authorize_run(session, runtime)
@@ -136,6 +144,14 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
         await invocation.guard.check(session)
         # COMMITTED 表示结果可靠落库；artifact 内业务状态仍可能是 FAILED / REJECTED。
         result = await ledger.commit_result(session, attempt_id, "result-" + uuid4().hex, artifact)
+        if action_id is not None:
+            from risk_platform.execution.actions import _audit
+            from risk_platform.workflow.persistence.models import ControlledActionRow
+            action = await session.get(ControlledActionRow, action_id, with_for_update=True)
+            action.result_id = result.result_id
+            if action.status not in {"REJECTED", "EXPIRED", "INVALIDATED"}:
+                action.status = artifact.execution.status.value
+            _audit(session, action, runtime.actor_id, "RESULT_COMMITTED", result_id=result.result_id)
         if artifact.observation is not None:
             # 纯确定性提取；与正式 Observation 同事务提交，恢复不重复写记忆。
             await capture_observation(session, result)
@@ -146,7 +162,7 @@ async def _phase(sessions, invocation, value, produce, *, runtime):
     # 已退出事务 3，提交成功后才把阶段产物交给调用方。
     return artifact
 
-async def query_phase(produce, *, sessions, call, model_name, task_id, capability):
+async def query_phase(produce, *, sessions, call, model_name, task_id, capability, skill_materials=()):
     """生成或复用工具请求；只有实际生成时才读取阶段记忆。"""
     execution, runtime = call.execution, call.runtime
     identity = execution.identity
@@ -154,9 +170,10 @@ async def query_phase(produce, *, sessions, call, model_name, task_id, capabilit
     value = ToolOperationInput(investigation_id=identity.investigation_id, round_id=identity.round_id,
         plan_id=identity.plan_id, task_id=task_id, operation_type=OperationType.QUERY_FORMULATION,
         capability=capability.value, model_name=model_name,
-        prompt_version=query_contract_digest(TOOL_SELECTION_SYSTEM_PROMPT,
+        prompt_version=query_contract_digest(TOOL_SELECTION_SYSTEM_PROMPT +
+            json.dumps(skill_materials, ensure_ascii=False, sort_keys=True),
             capability=capability, names=tuple(d.tool.name for d in definitions)),
-        tool_limits={d.tool.name: d.execution_limits(runtime) for d in definitions})
+        tool_limits={d.tool.name: d.stage_limits(runtime) for d in definitions})
     async def generate():
         async with sessions.begin() as session:
             await authorize_run(session, runtime)
@@ -164,7 +181,17 @@ async def query_phase(produce, *, sessions, call, model_name, task_id, capabilit
             memory = await context_for_stage(session, runtime=runtime,
                 run_id=execution.identity.run_id,
                 stage="QUERY:" + hashlib.sha256(value.task_id.encode()).hexdigest())
-        outcome = await produce(memory_context=memory) if memory.memories else await produce()
+        options = {"memory_context": memory} if memory.memories else {}
+        if any(d.tool.name == "query_model_metrics" for d in definitions):
+            from functools import partial
+            from risk_platform.execution.metric_reads import read_events, read_definition
+            async with sessions.begin() as session:
+                await authorize_run(session, runtime)
+                await execution.guard.check(session)
+                events = await read_events(session, identity.run_id, task_id)
+            options.update(definition_events=events, definition_reader=partial(read_definition,
+                sessions=sessions, invocation=execution, runtime=runtime, task_id=task_id))
+        outcome = await produce(**options)
         if outcome.failure is not None:
             return ToolArtifact(execution=outcome.failure)
         selected = validate_tool_call(ToolCall(outcome.tool_name, outcome.candidate), value.capability, runtime)
@@ -189,12 +216,19 @@ async def tool_phase(produce, *, sessions, call, task_id, candidate, tool_name, 
         plan_id=identity.plan_id, task_id=task_id, operation_type=OperationType.TOOL_EXECUTION,
         capability=capability.value, tool_name=tool_name,
         candidate_request=candidate.model_dump(mode="json") if isinstance(candidate, BaseModel) else candidate,
-        tool_limits={tool_name: definition.execution_limits(runtime)})
+        tool_limits={tool_name: definition.stage_limits(runtime)})
     async def execute_tool():
         # 结果与任务、请求及协议的对应关系由账本提交边界统一校验。
         return ToolArtifact(execution=await produce())
-
-    artifact = await _phase(sessions, execution, value, execute_tool, runtime=runtime)
+    if definition.approval is not None:
+        from risk_platform.execution.actions import approval_gate, execute_approved
+        action = await approval_gate(sessions, call, value, definition)
+        async def execute_controlled():
+            return ToolArtifact(execution=await execute_approved(sessions, call, action, definition, produce))
+        artifact = await _phase(sessions, execution, value, execute_controlled, runtime=runtime,
+            recover=execute_controlled, action_id=action.action_id)
+    else:
+        artifact = await _phase(sessions, execution, value, execute_tool, runtime=runtime)
     result = artifact.execution
     logger.info("tool_result", extra={
         "operation_key": operation_key(value), "tool_name": value.tool_name,
@@ -212,13 +246,14 @@ async def tool_phase(produce, *, sessions, call, task_id, candidate, tool_name, 
 #    交给 _phase() 保存或复用
 #     ↓
 # ③ 从账本产物中取出 Observation，返回给节点
-async def observation_phase(produce, *, sessions, call, model_name, results):
+async def observation_phase(produce, *, sessions, call, model_name, results, skill_materials=()):
     """保存或复用 Observation；记忆仍由 _phase 在提交事务中提取。"""
     execution, runtime = call.execution, call.runtime
     identity = execution.identity
     value = ToolOperationInput(investigation_id=identity.investigation_id, round_id=identity.round_id,
         plan_id=identity.plan_id, operation_type=OperationType.OBSERVATION, model_name=model_name,
-        prompt_version=hashlib.sha256((OBSERVATION_SYSTEM_PROMPT + TOKENIZER_SHA256).encode()).hexdigest(),
+        prompt_version=hashlib.sha256((OBSERVATION_SYSTEM_PROMPT + TOKENIZER_SHA256 +
+            json.dumps(skill_materials, ensure_ascii=False, sort_keys=True)).encode()).hexdigest(),
         execution_refs=tuple(r.execution_id for r in results))
     async def explain():
         return ToolArtifact(observation=await produce())

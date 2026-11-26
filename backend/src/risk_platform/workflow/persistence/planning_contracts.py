@@ -7,6 +7,7 @@ from risk_platform.workflow.contracts import InvestigationPlan
 
 
 class PlanningCandidate(LedgerContract):
+    schema_version: Literal[2] = 2
     plan: InvestigationPlan
 
 

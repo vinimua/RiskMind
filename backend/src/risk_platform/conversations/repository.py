@@ -1,12 +1,12 @@
 """聊天短事务操作；不在数据库事务内等待模型或运行调查。"""
 import hashlib
 import json
+from itertools import groupby
 from datetime import datetime, timezone
 from sqlalchemy import select
 from risk_platform.workflow.persistence.contracts import canonical_json, input_digest
-from risk_platform.memory.contracts import MemoryRecord, MemoryScope
 from .contracts import ChatResponse
-from .models import ConversationRow, ChatTurnRow
+from .models import ConversationRow, ChatTurnRow, EntryDecisionRow, ChatReadRow
 from typing import Literal
 from pydantic import Field
 from risk_platform.memory.contracts import MemoryContract, Identity, NonBlank
@@ -91,18 +91,32 @@ async def claim_turn(session, request, *, actor, authorize_conversation):
     return conversation_id, turn_id, None
 
 
-async def history_and_memories(session, conversation_id, actor):
-    rows = list(await session.scalars(select(ChatTurnRow).where(
+async def history_turns(session, conversation_id, actor, *, after_turn=0, limit=None, include_reads=False):
+    conversation = await session.get(ConversationRow, conversation_id)
+    if conversation is None or conversation.owner_id != actor:
+        raise ChatNotFoundError("会话不可访问")
+    statement = select(ChatTurnRow, EntryDecisionRow).outerjoin(EntryDecisionRow,
+        EntryDecisionRow.turn_id == ChatTurnRow.turn_id).where(
         ChatTurnRow.conversation_id == conversation_id, ChatTurnRow.actor_id == actor,
-        ChatTurnRow.status == "SUCCEEDED", ChatTurnRow.action.in_(("CHAT", "AUTO", "ENTRY_DECISION"))).order_by(ChatTurnRow.created_at.desc(), ChatTurnRow.turn_id).limit(10)))
-    history, memories = [], []
-    for row in reversed(rows):
+        ChatTurnRow.turn_number > after_turn, ChatTurnRow.status == "SUCCEEDED",
+        ChatTurnRow.action.in_(("CHAT", "AUTO", "ENTRY_DECISION"))).order_by(ChatTurnRow.turn_number)
+    if limit is not None:
+        statement = statement.limit(limit)
+    rows = list((await session.execute(statement)).all())
+    turns = []
+    readable = {}
+    read_groups = {}
+    if include_reads:
+        from risk_platform.memory import personal
+        readable = {note["note_id"]:note for note in await personal.catalogue(session, actor, for_model=True)}
+        read_rows = list(await session.scalars(select(ChatReadRow).where(
+            ChatReadRow.turn_id.in_([row.turn_id for row, _ in rows])).order_by(ChatReadRow.turn_id, ChatReadRow.sequence)))
+        read_groups = {identity:_read_pairs(list(group)) for identity, group in groupby(read_rows, key=lambda r:r.turn_id)}
+    for row, decision_row in rows:
         response = read_response(row)
         if row.action == "ENTRY_DECISION":
-            from .models import EntryDecisionRow
             from .action_repository import read_decision
             from .contracts import ChatDraft
-            decision_row = await session.get(EntryDecisionRow, row.turn_id)
             if decision_row is None:
                 raise ChatConflictError("新入口回答缺少可靠决策")
             if not isinstance(read_decision(decision_row, row), ChatDraft):
@@ -115,29 +129,63 @@ async def history_and_memories(session, conversation_id, actor):
                 raise ChatConflictError("意图记录摘要不一致")
             if intent.intent not in ("CHAT", "CLARIFY"):
                 continue  # 案件结果不能经普通聊天历史绕过案件 READ 授权。
-        # 当前仅近期窗口和字符限制；不声称已经实现全 Prompt token 预算。
-        history.extend(({"role": "user", "content": row.user_text[:2000]},
-                        {"role": "assistant", "content": response.answer[:2000]}))
-        if row.memory_payload is not None:
-            memory = MemoryRecord.model_validate_json(row.memory_payload)
-            if (input_digest(memory) != row.memory_digest or memory.source_id != row.turn_id
-                    or memory.source_type != "CHAT_SESSION"
-                    or memory.scope != MemoryScope(kind="CONVERSATION", id=conversation_id)):
-                raise ChatConflictError("会话记忆来源或摘要不一致")
-            memories.append(memory)
-    # 历史时间顺序给模型，记忆近期优先给组装器。
-    return history, list(reversed(memories))
+        turn = dict(turn_id=row.turn_id, turn_number=row.turn_number,
+                    user=row.user_text, assistant=response.answer)
+        if include_reads:
+            pairs = read_groups.get(row.turn_id, [])
+            read_messages = []
+            for interaction, pair in enumerate(pairs):
+                value = json.loads(pair[1]["content"])
+                if pair[0]["tool_calls"][0]["function"]["name"] == "read_memory":
+                    note_id = value["note_id"]
+                    note = readable.get(note_id)
+                    if note is None:
+                        continue  # 失权或停用笔记不带入后续聊天。
+                    # 历史笔记正文不转存成永久聊天摘要；后续需要时重新读当前有效笔记。
+                    value = {k: value[k] for k in ("note_id", "version", "start_paragraph", "next_paragraph") if k in value}
+                    value.update(body_omitted=True, current_version=note["version"],
+                        source_turn=row.turn_number, read_interaction=interaction,
+                        recovery="当前偏好用 read_memory；核对当时依据用 read_chat_history 回查此轮读取序号")
+                    pair = [pair[0], dict(pair[1], content=json.dumps(value, ensure_ascii=False))]
+                else:
+                    value = {"body_omitted":True, "recovery":pair[0]["tool_calls"][0]["function"]}
+                    pair = [pair[0], dict(pair[1], content=json.dumps(value, ensure_ascii=False))]
+                read_messages.extend(pair)
+            if read_messages:
+                turn["read_messages"] = read_messages
+        turns.append(turn)
+    return {"turns": turns, "through_turn_number": rows[-1][0].turn_number if rows else after_turn}
 
 
-async def complete_turn(session, response, *, memory=None):
+async def complete_turn(session, response):
     row = await session.scalar(select(ChatTurnRow).where(ChatTurnRow.turn_id == response.turn_id).with_for_update())
     if row is None or row.status != "STARTED" or row.conversation_id != response.conversation_id:
         raise ChatConflictError("本轮已结算或身份不一致")
-    if memory is not None and (response.status != "SUCCEEDED" or memory.source_id != row.turn_id
-            or memory.source_type != "CHAT_SESSION" or memory.scope != MemoryScope(kind="CONVERSATION", id=row.conversation_id)):
-        raise ChatConflictError("记忆来源不属于本轮")
     row.status, row.response_payload, row.response_digest = response.status, canonical_json(response), input_digest(response)
-    row.memory_payload = canonical_json(memory) if memory is not None else None
-    row.memory_digest = input_digest(memory) if memory is not None else None
     row.ended_at = datetime.now(timezone.utc)
     await session.flush()
+
+
+async def read_interactions(session, turn_id):
+    """调用方负责轮次归属；校验顺序与原始内容后返回完整读取配对。"""
+    rows = list(await session.scalars(select(ChatReadRow).where(
+        ChatReadRow.turn_id == turn_id).order_by(ChatReadRow.sequence)))
+    return _read_pairs(rows)
+
+
+def _read_pairs(rows):
+    """单轮查询与历史批量查询共用同一顺序、摘要校验。"""
+    values = []
+    for sequence, row in enumerate(rows):
+        if row.sequence != sequence or hashlib.sha256(row.payload.encode()).hexdigest() != row.digest:
+            raise ChatConflictError("读取交互顺序或正文摘要不一致")
+        values.append(json.loads(row.payload))
+    return values
+
+
+async def append_read(session, turn_id, messages):
+    """在持有本轮行锁的短事务中调用，完整保存请求和结果，不保存客户端。"""
+    rows = await read_interactions(session, turn_id)
+    payload = json.dumps(messages, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    session.add(ChatReadRow(turn_id=turn_id, sequence=len(rows), payload=payload,
+                           digest=hashlib.sha256(payload.encode()).hexdigest()))

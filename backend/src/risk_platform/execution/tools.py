@@ -15,11 +15,12 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.messages import AIMessage
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
-from risk_platform.execution import knowledge, csv_statistics
+from risk_platform.execution import knowledge, csv_statistics, report_export, metrics
 from risk_platform.execution.contracts import CsvStatisticsRequest, CsvStatisticsPayload, CsvStatisticsReference
 from risk_platform.execution.contracts import KnowledgeSearchToolRequest, KnowledgeExecutionPayload, TaskExecutionResult
 from risk_platform.workflow.contracts import CapabilityType
 from risk_platform.workflow.runtime import InvestigationAction, InvestigationRuntimeContext, check_runtime
+from risk_platform.execution.actions import ApprovalPolicy, _authorize
 
 
 async def knowledge_search(config: RunnableConfig, **arguments):
@@ -90,6 +91,7 @@ class ToolDefinition:
     # 核验结果与原请求、执行限制的对应关系。
     validate_result: Callable[[BaseModel, dict, BaseModel], None]
     result_version: str = "1"
+    approval: ApprovalPolicy | None = None
 
     def __post_init__(self):
         if not all(callable(function) for function in (
@@ -104,6 +106,15 @@ class ToolDefinition:
             raise TypeError("工具参数、结果和引用协议必须是 Pydantic 模型类")
         if self.tool.name != "knowledge_search" and "reference_id" not in self.reference_model.model_fields:
             raise ValueError("通用引用协议必须包含结果项 reference_id")
+
+    def stage_limits(self, runtime):
+        """阶段固定业务范围及批准策略，防止恢复时静默撤掉审批门槛。"""
+        limits = dict(self.execution_limits(runtime))
+        if self.approval is not None:
+            limits["_approval"] = {"version": self.approval.version,
+                "ttl_seconds": self.approval.ttl_seconds,
+                "material_schema": self.approval.material_model.model_json_schema()}
+        return limits
 
 # 模型选择后怎么校验
 # 链路是：
@@ -155,7 +166,32 @@ CSV_SAMPLE_STATISTICS = ToolDefinition(
     reference_model=CsvStatisticsReference, validate_reference=csv_statistics.validate_reference,
     authorize_result=csv_statistics.authorize_result, validate_result=csv_statistics.validate_result,
 )
-TOOL_DEFINITIONS = MappingProxyType({tool.tool.name: tool for tool in (KNOWLEDGE_SEARCH, CSV_SAMPLE_STATISTICS)})
+REPORT_EXPORT = ToolDefinition(
+    tool=StructuredTool.from_function(coroutine=report_export.export_report,
+        name=report_export.ReportExportTool.name, description="申请导出已提交的调查发现、未解决问题和证据来源。必须由用户批准后执行；不导出原始数据或内部配置。",
+        args_schema=report_export.ReportRequest, infer_schema=False),
+    capability=CapabilityType.COMPUTATION,
+    execution_limits=lambda runtime: {"investigation_id": runtime.investigation.investigation_id},
+    validate_request=report_export.validate_request,
+    result_model=report_export.ReportReceipt,
+    to_observation_items=lambda receipt: [{"reference_id": receipt.artifact_id, "content": receipt.model_dump(mode="json")}],
+    reference_model=report_export.ReportReference, validate_reference=report_export.validate_reference,
+    authorize_result=report_export.authorize_result, validate_result=report_export.validate_result,
+    approval=ApprovalPolicy(ttl_seconds=900, material_model=report_export.ReportMaterial,
+        prepare=report_export.prepare, authorize_material=report_export.precondition,
+        precondition=report_export.precondition, verify=report_export.verify),
+)
+MODEL_METRICS = ToolDefinition(
+    tool=StructuredTool.from_function(coroutine=metrics.query_model_metrics,
+        name="query_model_metrics", description="查询已保存的模型指标；必须先读取指标定义，精确匹配口径版本和统计窗口；TEST结果不代表生产事实。",
+        args_schema=metrics.MetricQuery, infer_schema=False),
+    capability=CapabilityType.FACT_RETRIEVAL,
+    execution_limits=metrics.execution_limits, validate_request=metrics.validate_request,
+    result_model=metrics.MetricPage, to_observation_items=metrics.observation_items,
+    reference_model=metrics.MetricReference, validate_reference=metrics.validate_reference,
+    authorize_result=metrics.authorize_result, validate_result=metrics.validate_result,
+)
+TOOL_DEFINITIONS = MappingProxyType({tool.tool.name: tool for tool in (KNOWLEDGE_SEARCH, CSV_SAMPLE_STATISTICS, REPORT_EXPORT, MODEL_METRICS)})
 
 
 def tool_definition(name: str) -> ToolDefinition:
@@ -173,7 +209,21 @@ def available_tools(capability: CapabilityType, runtime: InvestigationRuntimeCon
     available = tuple(tool for tool in matches if tool.tool.name in bound)
     if not available:
         raise ToolUnavailableError("TOOL_NOT_BOUND")
-    return available
+    source = runtime.investigation.planning_input
+    resource = {"investigation_id": runtime.investigation.investigation_id,
+        "round_id": runtime.round.round_id,
+        "model_id": source.monitoring_alert.model_id if source.monitoring_alert else source.user_query.model_id}
+    permitted = []
+    for definition in available:
+        if definition.approval is not None:
+            try:
+                _authorize(runtime.actor_id, "action:request", resource, runtime.authorize_resource)
+            except PermissionError:
+                continue
+        permitted.append(definition)
+    if not permitted:
+        raise ToolUnavailableError("TOOL_NOT_AUTHORIZED")
+    return tuple(permitted)
 
 
 def validate_tool_call(call: ToolCall, capability: CapabilityType, runtime: InvestigationRuntimeContext) -> ToolCall:
@@ -213,9 +263,12 @@ def required_tool_options() -> dict:
 
 def query_contract_digest(prompt: str, *, capability=CapabilityType.KNOWLEDGE_RETRIEVAL, names=None) -> str:
     """工具声明和调用协议也是模型输入的一部分，必须参与恢复规格摘要。"""
-    payload = {"protocol": "langchain-structured-tool/v6", "system_prompt": prompt,
+    payload = {"protocol": "langchain-structured-tool/v7", "system_prompt": prompt,
                "tools": [convert_to_openai_tool(d.tool) for d in TOOL_DEFINITIONS.values()
                          if d.capability == capability and (names is None or d.tool.name in names)],
                **required_tool_options()}
+    if names and "query_model_metrics" in names:
+        payload["definition_read_schema"] = metrics.DefinitionRequest.model_json_schema()
+        payload["definition_instructions"] = metrics.QUERY_INSTRUCTIONS
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode()).hexdigest()

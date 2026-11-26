@@ -77,8 +77,6 @@ def parse_entry_decision(message: AIMessage, *, offered_names):
     if finish_reason != "stop":
         raise ValueError("模型回答未正常结束")
     draft = ChatDraft.model_validate(_json_object(content))
-    if draft.memory.execution_summaries:
-        raise ValueError("聊天回答不能生成正式执行事实")
     return draft
 
 

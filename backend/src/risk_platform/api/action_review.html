@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>受控动作确认 · RiskMind</title>
+<style>
+body{font:16px/1.6 system-ui,sans-serif;max-width:960px;margin:40px auto;padding:0 20px;color:#172b3a;background:#f5f8fa}
+section{background:white;padding:24px;margin:20px 0;border:1px solid #d5e0e8;border-radius:10px}
+label{display:block;margin:12px 0}input,textarea,select{box-sizing:border-box;width:100%;padding:10px;border:1px solid #9aafbd;border-radius:5px;font:inherit}
+button{padding:10px 18px;margin:8px 8px 0 0;cursor:pointer}button:disabled{cursor:default;opacity:.5}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f0f5f8;padding:16px}#message{white-space:pre-wrap}small{color:#40586b}
+</style>
+<main>
+<h1>受控动作确认</h1>
+<p>确认仅适用于下面展示的固定材料。修改参数需要重新申请；执行情况不明确时，先核实，不重复发送操作。</p>
+<section>
+<label>动作 ID<input id="actionId" autocomplete="off" placeholder="action-…"></label>
+<label>访问令牌<input id="token" type="password" autocomplete="off"></label>
+<small>令牌只用于本页请求，不写入地址或浏览器存储。</small><br>
+<button id="load">查看动作</button>
+</section>
+<p id="message" role="status" aria-live="polite"></p>
+<section id="review" hidden>
+<h2 id="heading"></h2>
+<p id="summary"></p>
+<h3>本次固定参数与材料</h3><pre id="material"></pre>
+<details><summary>材料摘要与审计</summary><pre id="audit"></pre></details>
+<button id="approve">批准执行</button><button id="reject">拒绝</button>
+<button id="resume">核实状态并恢复</button><button id="download">下载报告</button>
+</section>
+<section id="verification" hidden>
+<h2>人工核实</h2>
+<p>只有具备核实权限的人才能提交。填写实际查证的理由与依据；成功结算还必须提供完整的工具结果。</p>
+<label>核实结论<select id="outcome"><option value="NOT_APPLIED">确认未生效</option><option value="FAILED">确认失败</option><option value="SUCCEEDED">确认成功</option></select></label>
+<label>核实理由<textarea id="reason" maxlength="2000"></textarea></label>
+<label>查证依据<textarea id="evidence" maxlength="4000"></textarea></label>
+<label>成功时的工具结果 JSON<textarea id="receipt"></textarea></label>
+<button id="resolve">提交核实并恢复</button>
+</section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let view = null, busy = false;
+function render() {
+  $("review").hidden = !view;
+  $("verification").hidden = !view || view.status !== "UNCERTAIN";
+  for (const id of ["load", "actionId", "token"]) $(id).disabled = busy;
+  if (!view) return;
+  $("heading").textContent = view.tool_name;
+  $("summary").textContent = `案件：${view.investigation_id}　任务：${view.task_id}　状态：${view.status}　有效期至：${view.expires_at}`;
+  $("material").textContent = JSON.stringify({request: view.request, material: view.material}, null, 2);
+  $("audit").textContent = JSON.stringify({digest: view.digest, decided_by: view.decided_by, audit: view.audit}, null, 2);
+  for (const id of ["approve", "reject"]) $(id).disabled = busy || view.status !== "PENDING_CONFIRMATION";
+  $("resume").disabled = busy || !["APPROVED", "EXECUTING", "UNCERTAIN", "REJECTED", "EXPIRED", "INVALIDATED"].includes(view.status);
+  $("download").hidden = view.tool_name !== "export_investigation_report";
+  $("download").disabled = busy || view.status !== "SUCCEEDED";
+  $("resolve").disabled = busy || view.status !== "UNCERTAIN";
+}
+async function request(path, method = "GET", body) {
+  if (!$("token").value.trim()) throw new Error("请输入访问令牌。");
+  const response = await fetch(path, {method, cache: "no-store", credentials: "omit",
+    headers: {Authorization: "Bearer " + $("token").value, ...(body ? {"Content-Type": "application/json"} : {})},
+    body: body ? JSON.stringify(body) : undefined});
+  if (!response.ok) {
+    const failure = await response.json();
+    throw new Error(`请求未完成（${response.status}）：${JSON.stringify(failure.detail)}`);
+  }
+  return response;
+}
+async function run(operation) {
+  busy = true; $("message").textContent = "正在处理……"; render();
+  try { await operation(); } catch (error) { $("message").textContent = error.message; }
+  finally { busy = false; render(); }
+}
+async function load(id) {
+  view = await (await request("/actions/" + encodeURIComponent(id))).json();
+  $("message").textContent = "已读取服务器保存的材料。";
+}
+async function decided(approved) {
+  if (!view || view.status !== "PENDING_CONFIRMATION") return;
+  if (!window.confirm(`${approved ? "批准执行" : "拒绝"} ${view.tool_name}？\n案件：${view.investigation_id}\n仅针对当前展示的材料。`)) {
+    $("message").textContent = "已取消确认，尚未提交决定。";
+    return;
+  }
+  const id = view.action_id;
+  const result = await (await request("/actions/" + encodeURIComponent(id) + "/confirmation", "POST", {digest: view.digest, approved})).json();
+  await load(id);
+  $("message").textContent = result.pending_action ? `流程已暂停：${result.status}。待处理动作：${result.pending_action.action_id}` : "决定已保存，流程已推进。";
+}
+$("load").onclick = () => run(() => load($("actionId").value.trim()));
+$("approve").onclick = () => run(() => decided(true));
+$("reject").onclick = () => run(() => decided(false));
+$("resume").onclick = () => run(async () => {
+  const result = await (await request("/investigations/" + encodeURIComponent(view.investigation_id) + "/resume", "POST")).json();
+  await load(view.action_id);
+  $("message").textContent = result.status || "流程已推进。";
+});
+$("download").onclick = () => run(async () => {
+  const response = await request("/actions/" + encodeURIComponent(view.action_id) + "/report");
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a"); link.href = url; link.download = view.action_id + ".md"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  $("message").textContent = "报告已下载。";
+});
+$("resolve").onclick = () => run(async () => {
+  const body = {digest: view.digest, outcome: $("outcome").value, reason: $("reason").value.trim(), evidence: $("evidence").value.trim(),
+    result: $("outcome").value === "SUCCEEDED" ? JSON.parse($("receipt").value) : null};
+  if (!body.reason || !body.evidence) throw new Error("核实理由和依据不能为空。");
+  const result = await (await request("/actions/" + encodeURIComponent(view.action_id) + "/resolution", "POST", body)).json();
+  await load(view.action_id); $("message").textContent = result.status || "核实已保存，流程已推进。";
+});
+render();
+</script>
+</html>

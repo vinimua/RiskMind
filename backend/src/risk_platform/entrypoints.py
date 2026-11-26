@@ -1,13 +1,16 @@
 """告警与聊天的应用入口。调查执行统一委托 Runner，不维护第二套图或任务循环。"""
 import asyncio
+import json
 import math
 from risk_platform.core.observability import trace_chat, tag_chat_turn
 from pydantic import AwareDatetime, ConfigDict, Field, TypeAdapter
 from sqlalchemy import select
 from risk_platform.conversations import repository as chat_store
 from risk_platform.conversations.contracts import ChatResponse
-from risk_platform.memory.contracts import Identity, NonBlank, MemoryScope
-from risk_platform.memory.context import assemble_context
+from risk_platform.memory.contracts import Identity, NonBlank
+from risk_platform.memory import personal
+from risk_platform.conversations import context as chat_context
+from risk_platform.core.token_budget import ContextBudgetExceeded
 from risk_platform.workflow.contracts import MonitoringAlert, InitialPlanningInput, UserQuery
 from risk_platform.workflow.persistence import repository as ledger
 from risk_platform.workflow.persistence.contracts import InvestigationRecord, RoundRecord
@@ -99,6 +102,58 @@ class EntryServices:
         runtime = await self._runtime(actor, case_id, execute=True)
         return await self.runner.ainvoke(context=InvestigationInvocation(runtime=runtime))
 
+    async def inspect_action(self, action_id, *, actor):
+        from risk_platform.execution import actions
+        from dataclasses import replace
+        from risk_platform.workflow.persistence.models import ControlledActionRow
+        from risk_platform.workflow.runtime import check_runtime
+        async with self.sessions() as session:
+            row = await session.get(ControlledActionRow, action_id)
+            if row is None:
+                raise chat_store.ChatNotFoundError("Action not found")
+            case_id = actions._body(row)["investigation_id"]
+        runtime = await self._runtime(actor, case_id, execute=False)
+        runtime = replace(runtime, tools=tuple(self.tools_for(actor, runtime.investigation.planning_input)))
+        check_runtime(runtime, InvestigationAction.READ)
+        return await actions.inspect(self.sessions, action_id, runtime=runtime)
+
+    async def confirm_action(self, action_id, decision, *, actor):
+        from risk_platform.execution import actions
+        view = await actions.decide(self.sessions, action_id, actor=actor, authorize=self.authorize_resource,
+            digest=decision.digest, approved=decision.approved)
+        # 批准者只授予批准事实；原申请者仍必须有当前执行权限。
+        return await self._run_case(view["requested_by"], view["investigation_id"])
+
+    async def resolve_action(self, action_id, resolution, *, actor):
+        from risk_platform.execution import actions
+        view = await actions.resolve(self.sessions, action_id, actor=actor,
+            authorize=self.authorize_resource, resolution=resolution)
+        return await self._run_case(view["requested_by"], view["investigation_id"])
+
+    async def resume_investigation(self, case_id, *, actor):
+        return await self._run_case(actor, case_id)
+
+    async def download_report(self, action_id, *, actor):
+        import hashlib
+        from risk_platform.execution import report_export
+        view = await self.inspect_action(action_id, actor=actor)
+        if view["tool_name"] != report_export.ReportExportTool.name or view["status"] != "SUCCEEDED":
+            raise ledger.LedgerConflictError("Report is not ready")
+        from dataclasses import replace
+        from risk_platform.workflow.runtime import check_runtime
+        runtime = await self._runtime(actor, view["investigation_id"], execute=False)
+        runtime = replace(runtime, tools=tuple(self.tools_for(actor, runtime.investigation.planning_input)))
+        check_runtime(runtime, InvestigationAction.READ)
+        from risk_platform.execution.actions import _authorize
+        _authorize(actor, "action:download", view, self.authorize_resource)
+        receipt = report_export.ReportReceipt.model_validate(view["result"]["payload"])
+        path = report_export.artifact_path(report_export.binding(runtime).directory, action_id)
+        content = await asyncio.to_thread(path.read_bytes)
+        approved_hash = hashlib.sha256(view["material"]["markdown"].encode()).hexdigest()
+        if receipt.artifact_id != action_id or hashlib.sha256(content).hexdigest() != receipt.sha256 or receipt.sha256 != approved_hash:
+            raise ledger.LedgerIntegrityError("Report content differs from approved material")
+        return content
+
     async def from_alert(self, request, *, actor):
         actor = TypeAdapter(Identity).validate_python(actor)
         request = AlertRequest.model_validate_json(request.model_dump_json())
@@ -134,8 +189,12 @@ class EntryServices:
             from risk_platform.workflow.persistence.contracts import RoundProgression
             progression = await session.get(RoundProgressionRow, runtime.round.round_id)
             reason = ledger._read(progression, RoundProgression).stop_reason if progression else None
+            from risk_platform.workflow.persistence.models import ControlledActionRow
+            pending = list(await session.scalars(select(ControlledActionRow).where(
+                ControlledActionRow.plan_id == plan.plan_id, ControlledActionRow.result_id.is_(None)))) if plan else []
+            awaiting = "；待处理动作：" + "、".join(f"{row.action_id}（{row.status}）" for row in pending) if pending else ""
             return (f"案件 {case_id} 仍为 OPEN。正式计划：{'已接受' if plan else '尚未接受'}；执行状态：{'、'.join(statuses) or '暂无已提交结果'}；本轮解释：{observation}。不表示已确认根因或关闭案件。"
-                    + (f"停止原因：{reason}" if reason else ""))
+                    + (f"停止原因：{reason}" if reason else "") + awaiting)
     @trace_chat
     async def chat(self, request, *, actor):
         """一次模型决策；查询立即执行，启动调查等待确认。"""
@@ -169,14 +228,95 @@ class EntryServices:
                 return existing
         # 模型调用发生在已提交用户消息之后，不持有事务或行锁。
         try:
+            compaction_budget = {"remaining":8}
             async with self.sessions() as session:
                 await actions.owned_turn(session, turn_id, actor=actor, authorize=self.authorize_conversation)
-                history, memories = await chat_store.history_and_memories(session, conversation_id, actor)
-            context = assemble_context(scope=MemoryScope(kind="CONVERSATION", id=conversation_id), candidates=memories)
-            # 模型会收到本次消息、近期聊天记录、选中的历史记忆，以及调用方明确绑定的目标。
+                previous = await chat_context.latest_summary(session, conversation_id, actor)
+                turns = (await chat_store.history_turns(session, conversation_id, actor,
+                    after_turn=previous.through_turn_number if previous else 0, include_reads=True))["turns"]
+                memory_index = await personal.catalogue(session, actor, for_model=True)
+            # 先提供个人笔记目录；正文由本次模型按需读取，身份不进入模型参数。
+            async def read_memory(note_id):
+                async with self.sessions() as session:
+                    await actions.owned_turn(session, turn_id, actor=actor, authorize=self.authorize_conversation)
+                    return await personal.read_note(session, actor, note_id, for_model=True)
+            async def record_read(messages):
+                async with self.sessions.begin() as session:
+                    turn = await actions.owned_turn(session, turn_id, actor=actor,
+                        authorize=self.authorize_conversation, write=True)
+                    if turn.status != "STARTED":
+                        raise chat_store.ChatConflictError("已结束的轮次不能追加读取")
+                    # 模型等待后重新检查读取开关和笔记版本，失权材料不写入本轮。
+                    value = json.loads(messages[1]["content"])
+                    note_value = value if messages[0]["tool_calls"][0]["function"]["name"] == "read_memory" else value.get("note")
+                    if note_value is not None:
+                        note = await personal.read_note(session, actor, note_value["note_id"], for_model=True)
+                        if not value.get("historical_not_current") and note.version != note_value["version"]:
+                            raise chat_store.ChatConflictError("读取期间笔记已更新")
+                    await chat_store.append_read(session, turn_id, messages)
+            async def read_history(from_turn, to_turn, budget, read_interaction, start_paragraph):
+                from risk_platform.core.token_budget import request_tokens, paragraph_page
+                async with self.sessions() as session:
+                    current = await actions.owned_turn(session, turn_id, actor=actor,
+                        authorize=self.authorize_conversation)
+                    if to_turn >= current.turn_number:
+                        raise ValueError("只能回查当前请求之前的历史")
+                    if read_interaction is not None:
+                        from risk_platform.conversations.models import ChatTurnRow
+                        old_turn = await session.scalar(select(ChatTurnRow).where(
+                            ChatTurnRow.conversation_id == conversation_id, ChatTurnRow.actor_id == actor,
+                            ChatTurnRow.turn_number == from_turn))
+                        pairs = await chat_store.read_interactions(session, old_turn.turn_id) if old_turn else []
+                        if read_interaction >= len(pairs):
+                            raise ValueError("历史读取记录不存在")
+                        pair = pairs[read_interaction]
+                        if pair[0]["tool_calls"][0]["function"]["name"] != "read_memory":
+                            raise ValueError("此条不是笔记读取，请直接按轮次回查问答")
+                        note = json.loads(pair[1]["content"])
+                        await personal.read_note(session, actor, note["note_id"], for_model=True)
+                        # 使用当时保存的正文，不用当前新版冒充历史依据。
+                        note.update(snapshot_source_start=note["start_paragraph"],
+                                    snapshot_source_next=note["next_paragraph"])
+                        note.update(paragraph_page(note["content"], start=start_paragraph,
+                                                   max_tokens=max(1,budget-256)))
+                        return dict(from_turn=from_turn, to_turn=to_turn, historical_not_current=True,
+                                    read_interaction=read_interaction, note=note)
+                    page = await chat_store.history_turns(session, conversation_id, actor,
+                        after_turn=from_turn-1, limit=min(100, to_turn-from_turn+1), include_reads=True)
+                selected = []
+                for item in page["turns"]:
+                    if item["turn_number"] > to_turn:
+                        break
+                    if request_tokens([*selected, item]) > budget:
+                        if not selected:
+                            raise ContextBudgetExceeded("单个完整历史问答超过剩余预算")
+                        break
+                    selected.append(item)
+                next_turn = selected[-1]["turn_number"]+1 if selected else page["through_turn_number"]+1
+                return dict(from_turn=from_turn, to_turn=to_turn, turns=selected,
+                            next_turn=next_turn if next_turn <= to_turn else None)
+            async def fit_history(reserve=0):
+                async with self.sessions() as session:
+                    await actions.owned_turn(session, turn_id, actor=actor, authorize=self.authorize_conversation)
+                    latest = await chat_context.latest_summary(session, conversation_id, actor)
+                    remaining = (await chat_store.history_turns(session, conversation_id, actor,
+                        after_turn=latest.through_turn_number if latest else 0, include_reads=True))["turns"]
+                history, summary = await chat_context.compact_history(self.sessions, actor=actor,
+                    turn_id=turn_id, request=request, agent=self.chat_agent, authorize=self.authorize_conversation,
+                    previous=latest, turns=remaining, memory_index=memory_index, compaction_budget=compaction_budget,
+                    reserve_tokens=reserve, history_reader=True)
+                from risk_platform.conversations.agent import entry_request
+                return entry_request(request.message, history=history, summary=summary, memory_index=memory_index,
+                    investigation_id=request.investigation_id, model_id=request.model_id, history_reader=True)[0]
             async with asyncio.timeout(self.timeout_seconds):
-                decision = await asyncio.to_thread(self.chat_agent.decide, request.message,
-                    history=history, memory_context=context, investigation_id=request.investigation_id, model_id=request.model_id)
+                history, summary = await chat_context.compact_history(self.sessions, actor=actor,
+                    turn_id=turn_id, request=request, agent=self.chat_agent, authorize=self.authorize_conversation,
+                    previous=previous, turns=turns, memory_index=memory_index,
+                    compaction_budget=compaction_budget, history_reader=True)
+                decision = await self.chat_agent.decide(request.message,
+                    history=history, summary=summary, memory_index=memory_index, read_memory=read_memory,
+                    investigation_id=request.investigation_id, model_id=request.model_id,
+                    read_history=read_history, record_read=record_read, fit_history=fit_history)
             # 结果有两种结构：
             # - 工具调用：工具名称、参数、目标案件、目标模型。
             # - 普通回答：回答正文与可选记忆候选。
@@ -186,17 +326,32 @@ class EntryServices:
                     validate_entry_target(request, decision)
                 except EntryTargetError as error:
                     rejection = str(error)
-        except Exception:
+        except Exception as error:
             # 无可靠决策时，只保存失败结果；不生成替代动作或自动再次调用模型。
+            code, answer = "DEPENDENCY", "入口决策未完成，没有执行入口工具。"
+            if isinstance(error, ContextBudgetExceeded):
+                code, answer = "CONTEXT_BUDGET", "会话输入超过预算，请缩小输入后使用新的 request_id 重试；原始历史已保留。"
+            elif isinstance(error, chat_context.ConversationCompactionError):
+                code, answer = "COMPACTION_FAILED", "会话摘要未完成，未执行入口工具；请使用新的 request_id 重试。"
             async with self.sessions.begin() as session:
                 turn = await actions.owned_turn(session, turn_id, actor=actor, authorize=self.authorize_conversation, write=True)
                 await chat_store.complete_turn(session, ChatResponse(conversation_id=conversation_id,turn_id=turn_id,
-                    status="FAILED",answer="入口决策未完成，没有执行入口工具。",error_code="DEPENDENCY"))
+                    status="FAILED",answer=answer,error_code=code))
                 return await actions.state(session, turn)
         async with self.sessions.begin() as session:
             turn = await actions.owned_turn(session, turn_id, actor=actor, authorize=self.authorize_conversation, write=True)
             await actions.save_decision(session, turn, request, decision, rejection=rejection)
-            return await actions.state(session, turn)
+            view = await actions.state(session, turn)
+        from risk_platform.conversations.contracts import ChatDraft
+        if isinstance(decision, ChatDraft) and decision.memory_candidate:
+            try:
+                async with asyncio.timeout(min(12, self.timeout_seconds)):
+                    await personal.maintenance(self.sessions, actor, turn_id, self.chat_agent,
+                                               timeout_seconds=min(10, self.timeout_seconds))
+            except Exception:
+                # 回答已提交；连维护状态都无法写回时保留候选，允许显式重试。
+                pass
+        return view
 
     async def _authorize_entry_result(self, session, actor, view):
         if view.result is not None and view.result.investigation_id is not None:

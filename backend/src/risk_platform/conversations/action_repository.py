@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pydantic import TypeAdapter
 from sqlalchemy import select, text
-from risk_platform.memory.contracts import MemoryRecord, MemoryScope
+from risk_platform.memory.models import MemoryMaintenanceRow
 from risk_platform.workflow.persistence.contracts import canonical_json, input_digest
 from . import repository as chat
 from .contracts import ChatDraft, ToolInvocation, ChatResponse, EntryActionState
@@ -102,12 +102,10 @@ async def save_decision(session, turn, request, value, *, rejection=None):
     if rejection or not call:
         response = ChatResponse(conversation_id=turn.conversation_id, turn_id=turn.turn_id,
             status="SUCCEEDED", answer=rejection or value.answer)
-        memory = None
-        if not call and value.memory.item_count():
-            memory = MemoryRecord(memory_id=chat.stable_id("memory-chat-", turn.turn_id),
-                scope=MemoryScope(kind="CONVERSATION", id=turn.conversation_id),
-                source_type="CHAT_SESSION", source_id=turn.turn_id, content=value.memory)
-        await chat.complete_turn(session, response, memory=memory)
+        if not call and value.memory_candidate:
+            session.add(MemoryMaintenanceRow(turn_id=turn.turn_id, owner_id=turn.actor_id,
+                candidate=value.memory_candidate, status="PENDING"))
+        await chat.complete_turn(session, response)
     await session.flush()
     return row
 

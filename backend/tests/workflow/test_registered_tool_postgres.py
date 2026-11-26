@@ -205,6 +205,10 @@ def test_observation_drives_successor_and_recovers_transition(database, monkeypa
                 yield replace(claim, max_tasks=3)
         monkeypatch.setattr(runner_module, "_claim", limited_claim)
     class LoopAgent(Agent):
+        from pathlib import Path
+        from risk_platform.agents import investigation as agent_module
+        from risk_platform.agents.skills import SkillDirectory
+        skill_directory = SkillDirectory(Path(agent_module.__file__).with_name("skill_library"))
         def initial_plan(self, source, **kwargs):
             events.append("plan-next")
             assert kwargs["previous_observations"][0].unresolved_questions == ("Q2", "Q3")

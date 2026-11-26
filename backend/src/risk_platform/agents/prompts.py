@@ -74,6 +74,7 @@ sources 引用真实 execution_id、
 context_id、source(document_id/document_version/chunk_id)，quote 必须连续逐字出现在该 Context 中。
 失败、拒绝或零命中不能支持历史发现。不得虚构来源、引文或工具成功。
 executions 是工具结果的预算投影。items 保留该工具的结果项；omitted_items 表示预算省略，
+被省略的正文不视为已检查。若缺失内容影响判断，findings 不得据此补造，须在 unresolved_questions 说明材料缺口。
 不等于零命中。通用工具引用写为 {"execution_id":"实际执行ID","reference":{...}}，
 reference 必须符合该执行的 reference_schema，并引用已提供 items 的 reference_id。
 知识工具仍可引用实际 Context 与文档原文；计算等其他结果不应伪装成知识文档。

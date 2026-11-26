@@ -5,6 +5,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from langgraph.types import Command
 from risk_platform.execution.contracts import TaskExecutionResult
 from risk_platform.workflow.contracts import InitialPlanningInput, InvestigationPlan
 from risk_platform.workflow.observation import RoundObservation, read_observation
@@ -78,24 +79,50 @@ class InvestigationRunner:
         config = {"configurable": {"thread_id": run_id}}
         async with _claim(self._lock_engine, self._sessions, run_identity, context, policy,
                           allow_planning=creating_plan or preparation is not None) as invocation:
+            # 每轮最多八次读取，主图需容纳读取回边及任务、解释节点。
+            config["recursion_limit"] = invocation.max_rounds * 24 + 10
             snapshot = await self._graph.aget_state(config)
             # 旧拓扑的待执行节点不能静默跳过或映射；保留历史并明确拒绝。
-            if set(snapshot.next) - {"prepare_plan", "task_execution", "observation"}:
+            if set(snapshot.next) - {"prepare_plan", "read_skill", "task_execution", "observation"}:
                 raise ledger.LedgerIntegrityError("检查点包含旧拓扑节点，需要显式迁移后恢复")
             from risk_platform.workflow.planning import current_round_call
             root = InvestigationInvocation(runtime=context, execution=invocation)
             active = await current_round_call(snapshot.values, root, sessions=self._sessions)
             await validate_checkpoint(snapshot.values, active.execution, sessions=self._sessions, runtime=active.runtime)
-            if snapshot.values and not snapshot.next:
+            pauses = [pause for task in snapshot.tasks for pause in task.interrupts]
+            if pauses and pauses[0].value.get("status") == "WAITING_APPROVAL":
+                from risk_platform.execution.actions import inspect as inspect_action
+                pending = await inspect_action(self._sessions, pauses[0].value["pending_action"]["action_id"],
+                    runtime=active.runtime)
+                if pending["status"] == "PENDING_CONFIRMATION":
+                    return {"run_id": run_id, "investigation_id": case_id, "round_complete": False,
+                        "status": "WAITING_APPROVAL", "pending_action": pending}
+            if snapshot.values and not snapshot.next and not pauses:
                 if not snapshot.values.get("round_complete"):
                     raise ledger.LedgerIntegrityError("checkpoint 已结束但调查推进尚未完成")
                 output = snapshot.values
             else:
-                initial = None if snapshot.values else to_checkpoint_data(dict(checkpoint_schema_version=3, run_id=run_id, plan_id=plan_id,
+                interrupted = any(task.interrupts for task in snapshot.tasks)
+                initial = Command(resume=True) if interrupted else None if snapshot.values else to_checkpoint_data(dict(checkpoint_schema_version=3, run_id=run_id, plan_id=plan_id,
                     planning_input=context.investigation.planning_input))
                 output = await self._graph.ainvoke(initial, config, context=InvestigationInvocation(runtime=context, execution=invocation), durability="sync")
+            if output.get("__interrupt__"):
+                pending = output["__interrupt__"][0].value
+                if pending.get("status") not in {"WAITING_APPROVAL", "WAITING_VERIFICATION"}:
+                    raise ledger.LedgerIntegrityError("Unknown graph interrupt")
+                # Graph durability=sync 已保存中断；退出 _claim 才向调用者返回，释放运行锁。
+                return {"run_id": run_id, "investigation_id": case_id,
+                    "round_complete": False, **pending}
             active = await current_round_call(output, root, sessions=self._sessions)
             await validate_checkpoint(output, active.execution, sessions=self._sessions, runtime=active.runtime)
+            # 已完成检查点也会直接返回历史指标；返回前重新验证远端访问权限。
+            if any(row.get("tool_name") == "query_model_metrics" and row.get("payload") is not None
+                   for row in output["task_execution_results"]):
+                from risk_platform.execution.metrics import binding, DefinitionRequest
+                import asyncio
+                async with asyncio.timeout(active.runtime.timeout_seconds):
+                    await binding(active.runtime).client.call("list_metric_definitions",
+                        DefinitionRequest(model_id=binding(active.runtime).model_id))
             return dict(run_id=active.execution.identity.run_id, plan_id=output["plan_id"],
                 planning_input=InitialPlanningInput.model_validate(output["planning_input"]),
                 investigation_plan=InvestigationPlan.model_validate(output["investigation_plan"]),

@@ -71,7 +71,7 @@ def test_graph_requires_persistence_dependencies(missing):
 def test_single_persistent_topology() -> None:
     graph = _graph(FakeInvestigationAgent(_plan()))
     assert set(graph.get_graph().nodes) == {
-        "__start__", "prepare_plan", "task_execution", "observation", "__end__",
+        "__start__", "prepare_plan", "read_skill", "task_execution", "observation", "__end__",
     }
     # 恢复模块只能提供执行机制，不能再构造自己的 StateGraph。
     import ast
@@ -82,6 +82,11 @@ def test_single_persistent_topology() -> None:
         assert not any(isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                        and node.func.id == "StateGraph" for node in ast.walk(tree))
         assert not hasattr(module, "RecoveryState")
+    # 读取循环必须在唯一主图中可见，业务模块不得再创建或调用子图。
+    edges = {(edge.source, edge.target) for edge in graph.get_graph().edges}
+    assert ("prepare_plan", "read_skill") in edges
+    assert ("read_skill", "prepare_plan") in edges
+    assert ("prepare_plan", "task_execution") in edges
 
 
 def test_state_cannot_enable_retired_direct_execution() -> None:

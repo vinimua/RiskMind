@@ -15,6 +15,38 @@ class PayloadRow:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
 
+class ControlledActionRow(PayloadRow, Base):
+    __tablename__ = "controlled_actions"
+    action_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    approved: Mapped[bool | None] = mapped_column()
+    decided_by: Mapped[str | None] = mapped_column(String(128))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    result_id: Mapped[str | None] = mapped_column(String(128))
+    resolution: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        ForeignKeyConstraint(["run_id"], ["investigation_runs.run_id"]),
+        ForeignKeyConstraint(["plan_id"], ["investigation_plans.plan_id"]),
+        ForeignKeyConstraint(["result_id"], ["investigation_results.result_id"]),
+        UniqueConstraint("run_id", "task_id", name="uq_controlled_action_task"),
+        CheckConstraint("schema_version = 1 AND status IN ('PENDING_CONFIRMATION','APPROVED','REJECTED','EXPIRED','INVALIDATED','EXECUTING','UNCERTAIN','SUCCEEDED','FAILED')", name="ck_controlled_action_state"),
+    )
+
+
+class ActionAuditRow(Base):
+    __tablename__ = "controlled_action_audit"
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    actor_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event: Mapped[str] = mapped_column(String(32), nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+    __table_args__ = (ForeignKeyConstraint(["action_id"], ["controlled_actions.action_id"]),)
+
+
 class InvestigationRow(PayloadRow, Base):
     __tablename__ = "investigation_ledger"
     investigation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -64,7 +96,7 @@ class AcceptedPlanRow(PayloadRow, Base):
         ForeignKeyConstraint(["investigation_id", "round_id"], ["investigation_rounds.investigation_id", "investigation_rounds.round_id"]),
         UniqueConstraint("plan_id", "investigation_id", "round_id", name="uq_ledger_plan_identity"),
         UniqueConstraint("round_id", "plan_version", name="uq_ledger_plan_version"),
-        CheckConstraint("schema_version = 1 AND plan_version > 0", name="ck_ledger_plan"),
+        CheckConstraint("schema_version IN (1,2) AND plan_version > 0", name="ck_ledger_plan"),
     )
 
 

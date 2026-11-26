@@ -61,10 +61,10 @@ def test_chat_model_instrumentation_only_exports_model_usage_and_intent(monkeypa
     client=Client();monkeypatch.setattr(obs,"get_langfuse",lambda:client)
     from langchain_core.messages import AIMessage
     from tool_model_helpers import ToolModelStub
-    message = AIMessage(content='{"answer":"private answer","memory":{}}',
+    message = AIMessage(content='{"answer":"private answer","memory_candidate":null}',
         response_metadata={"finish_reason":"stop"}, usage_metadata={"input_tokens":10,"output_tokens":4,"total_tokens":14})
     agent=ChatAgent("glm-test",tool_model=ToolModelStub(message))
-    assert agent.decide("private message",history=[],memory_context=AgentContext(scope=MemoryScope(kind="CONVERSATION",id="C"))).answer=="private answer"
+    assert asyncio.run(agent.decide("private message",history=[],memory_index=[],read_memory=None)).answer=="private answer"
     assert [span.values["name"] for span in client.spans]==["entry-decision"]
     assert all(span.updates[0]["usage_details"]=={"input":10,"output":4,"total":14} for span in client.spans)
     assert "private" not in str([(span.values,span.updates) for span in client.spans])

@@ -1,4 +1,5 @@
 """CSV 统计的计算、授权、注册、引用和持久化验收；不调用真实模型。"""
+from pathlib import Path
 import asyncio
 import hashlib
 import json
@@ -136,6 +137,9 @@ def test_result_validation_and_reference(dataset):
 
 
 class Agent:
+    from risk_platform.agents.skills import SkillDirectory
+    from risk_platform.agents import investigation as agent_module
+    skill_directory = SkillDirectory(Path(agent_module.__file__).with_name("skill_library"))
     model = "test-model"
 
     def __init__(self):

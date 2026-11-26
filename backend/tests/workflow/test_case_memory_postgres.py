@@ -76,7 +76,7 @@ def test_history_reaches_planning_and_tool_request_without_reexecuting_old_round
     from risk_platform.workflow.contracts import InvestigationPlan, InvestigationTask
     class MemoryAgent(Agent):
         seen = []
-        def initial_plan(self, source, *, memory_context=None):
+        def initial_plan(self, source, *, memory_context=None, **kwargs):
             assert memory_context.memories
             self.seen.append(("planning", memory_context))
             return InvestigationPlan(goal="补充调查", tasks=[InvestigationTask(task_id="NEXT", objective="补查历史",

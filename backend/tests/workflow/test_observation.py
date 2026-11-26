@@ -307,3 +307,24 @@ def test_explanation_input_copy_cannot_replace_authoritative_result():
     assert output["observation"].error.code == "OBSERVATION_INVALID"
     assert results[0].payload.resolved.contexts[0].content == original_text
     assert results[0].payload.retrieved.hits[0].hit.source.document_version == "v1"
+
+
+def test_saved_result_pages_preserve_full_items_and_explicit_end():
+    from risk_platform.workflow.observation import result_page
+    from risk_platform.core.token_budget import ContextBudgetExceeded
+    result = execution()
+    page = result_page(result)
+    assert page["execution_id"] == result.execution_id and page["status"] == "SUCCEEDED"
+    assert page["items"][0]["reference_id"] == "P0"
+    assert page["next_item"] is None and page["total_items"] == 1
+    with pytest.raises(ContextBudgetExceeded):
+        result_page(result, max_tokens=10)
+    with pytest.raises(ValueError):
+        result_page(result, start_item=2)
+
+
+def test_saved_failed_result_page_does_not_turn_failure_into_empty_success():
+    from risk_platform.workflow.observation import result_page
+    page = result_page(execution(status="FAILED"))
+    assert page["status"] == "FAILED" and page["items"] == []
+    assert page["error"]["code"] == "DEPENDENCY_FAILURE" and page["next_item"] is None

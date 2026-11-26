@@ -91,9 +91,10 @@ def test_initial_plan_converts_draft_to_system_managed_tasks() -> None:
     assert "不生成 Hypothesis" in call["messages"][0]["content"]
     assert "available_capabilities" in call["messages"][0]["content"]
     context = json.loads(call["messages"][1]["content"])
+    assert context.pop("available_skills") == []
     assert context == {
         "source": "USER_QUERY",
-        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "COMPUTATION"],
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "FACT_RETRIEVAL", "COMPUTATION"],
         "query": "为什么 credit_v3 最近 KS 下降？",
         "model_id": "credit_v3",
         "time_window": None,
@@ -115,9 +116,10 @@ def test_initial_plan_serializes_monitoring_alert_as_json_data() -> None:
     agent.initial_plan(planning_input)
 
     context = json.loads(client.completions.calls[0]["messages"][1]["content"])
+    assert context.pop("available_skills") == []
     assert context == {
         "source": "MONITORING_ALERT",
-        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "COMPUTATION"],
+        "available_capabilities": ["KNOWLEDGE_RETRIEVAL", "FACT_RETRIEVAL", "COMPUTATION"],
         "alert_id": "ALERT-001",
         "model_id": "credit_v3",
         "metric": "KS",
@@ -144,9 +146,7 @@ def test_initial_plan_requires_a_registered_capability() -> None:
     agent = InvestigationAgent(client=client, model="glm-4.7-flash", tool_model=None)
     planning_input = InitialPlanningInput(
         user_query=UserQuery(query="为什么 KS 下降？"),
-        available_capabilities=[
-            CapabilityType.FACT_RETRIEVAL,
-        ],
+        available_capabilities=[],
     )
 
     with pytest.raises(ValueError, match="没有可用的已注册工具能力"):

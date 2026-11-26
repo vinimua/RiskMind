@@ -12,6 +12,7 @@ from risk_platform.knowledge import models  # noqa: F401
 from risk_platform.workflow.persistence import models as ledger_models  # noqa: F401
 from risk_platform.workflow.persistence import recovery_models  # noqa: F401
 from risk_platform.workflow.persistence import planning_models  # noqa: F401
+from risk_platform.execution import metric_reads  # noqa: F401
 
 
 config = context.config

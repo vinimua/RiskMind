@@ -66,10 +66,10 @@ def test_csv_declaration_only_exposes_its_own_request_fields():
     assert tools.CSV_SAMPLE_STATISTICS.tool.args_schema.model_config["extra"] == "forbid"
 
 
-def test_no_declaration_for_unimplemented_capability():
+def test_registered_metrics_capability_still_requires_explicit_binding():
     with pytest.raises(tools.ToolUnavailableError) as failure:
         tools.available_tools(CapabilityType.FACT_RETRIEVAL, runtime_for(state()["planning_input"], context()))
-    assert failure.value.code == "UNSUPPORTED_CAPABILITY"
+    assert failure.value.code == "TOOL_NOT_BOUND"
 
 
 @pytest.mark.parametrize("name,capability,code", [

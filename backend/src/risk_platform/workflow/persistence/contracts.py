@@ -44,6 +44,7 @@ class RoundRecord(LedgerContract):
 
 
 class AcceptedPlan(LedgerContract):
+    schema_version: Literal[2] = 2
     investigation_id: Identity
     round_id: Identity
     plan_id: Identity

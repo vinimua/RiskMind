@@ -72,3 +72,25 @@ class ContextSnapshot(MemoryContract):
     run_id: Identity
     stage: Identity
     context: AgentContext
+    
+# 一次会话：conversation_id = C1
+# │
+# ├─ 第 1 轮：turn_id = T1
+# │   用户：请结合代码解释
+# │   助手：好的……
+# │   保存记忆 M1：用户喜欢结合代码
+# │
+# ├─ 第 2 轮：turn_id = T2
+# │   用户：解释 prepare_plan
+# │   助手：这个函数……
+# │   可以读取 M1，并产生新的记忆 M2
+# │
+# └─ 第 3 轮：turn_id = T3
+#     用户继续提问……
+# 对应到类：
+# 类	对应上例中的什么
+# MemoryScope	归属范围，如 kind="CONVERSATION", id="C1"，表示属于整个会话
+# MemoryContent	记忆正文，如“用户喜欢结合代码”，自身不代表会话或轮次
+# MemoryRecord	某一轮产生的一份记忆，例如 M1：归属 C1，来源 source_id=T1
+# AgentContext	本次调用选中的记忆，例如回答 T3 时选择了 M1、M2
+# ContextSnapshot	某个案件调查阶段选用了什么记忆，当前不是聊天会话或聊天轮次对象

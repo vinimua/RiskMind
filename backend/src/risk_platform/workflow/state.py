@@ -31,3 +31,5 @@ class InvestigationState(TypedDict):
     run_id: NotRequired[str]
     plan_id: NotRequired[str]
     stop_reason: NotRequired[str | None]
+    # 只用于主图路由；节点执行时仍按正式账本核对阶段进度。
+    planning_next: NotRequired[Literal["read_skill", "task_execution"]]

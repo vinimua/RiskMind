@@ -33,60 +33,58 @@ def build_investigation_graph(
     if session_factory is None or checkpointer is None:
         raise ValueError("正式执行必须配置账本会话与检查点存储")
 
-    # LangGraph 传入 runtime
-    #     ↓
-    # 取出 runtime.context
-    #     ↓
-    # 检查调用包装与内部执行信息
-    #     ↓
-    # 返回给变量 call
-# call.runtime     # 身份、案件、工具绑定
-# call.execution   # 运行规格、guard、重试策略
+    # 图层解析可信调用身份；规划与接受由同一个业务入口完成。
     async def plan_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = await planning.current_round_call(state, require_invocation(runtime.context, claimed=True), sessions=session_factory)
-        return await planning.prepare_plan(state, call.execution, sessions=session_factory, agent=investigation_agent, runtime=call.runtime)
+        return await planning.prepare_plan(call.execution, sessions=session_factory, agent=investigation_agent, runtime=call.runtime)
+
+    async def read_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
+        call = await planning.current_round_call(state, require_invocation(runtime.context, claimed=True), sessions=session_factory)
+        return await planning.read_skill_material(call.execution, sessions=session_factory, agent=investigation_agent, runtime=call.runtime)
 
     async def execute_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         call = await planning.current_round_call(state, require_invocation(runtime.context, claimed=True), sessions=session_factory)
+        async with session_factory() as session:
+            await planning.authorize_run(session, call.runtime)
+            dialogue = await planning.read_planning_dialogue(session, call.execution.identity.run_id)
         update = await task_execution(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
+                                    skill_materials=planning.planning_methods(dialogue),
                                     query_phase=partial(phase_execution.query_phase, sessions=session_factory, call=call,
                                                         model_name=investigation_agent.model),
                                     tool_phase=partial(phase_execution.tool_phase, sessions=session_factory, call=call))
         return to_checkpoint_data(update)
 
-# graph.py：传入函数并预填依赖
-#     ↓
-# nodes.observation()：调用它
-#     ↓
-# phase_execution.observation_phase()：执行或复用解释
-#     ↓
-# _phase()：负责账本和事务
     async def observe_node(state: InvestigationState, runtime: Runtime[InvestigationInvocation]):
         root = require_invocation(runtime.context, claimed=True)
-        # root 是校验后的 runtime.context，不是外层的 LangGraph runtime
-    # runtime                         LangGraph 运行容器
-    # └─ context                  InvestigationInvocation
-    #      ├─ runtime             可信业务上下文
-    #      └─ execution           运行身份、Guard、恢复策略
         call = await planning.current_round_call(state, root, sessions=session_factory)
         source = InitialPlanningInput.model_validate(state["planning_input"])
         check_runtime(call.runtime, InvestigationAction.CONTINUE, source)
         async with session_factory() as session:
             material = await planning.round_material(session, call.execution, call.runtime)
+            await planning.authorize_run(session, call.runtime)
+            dialogue = await planning.read_planning_dialogue(session, call.execution.identity.run_id)
+        from risk_platform.workflow.contracts import InvestigationPlan
+        skill_materials = planning.select_task_methods(InvestigationPlan.model_validate(state["investigation_plan"]).tasks,
+                                                       planning.planning_methods(dialogue))
         update = await observation(state, investigation_agent=investigation_agent, runtime_context=call.runtime,
                                  observation_phase=partial(phase_execution.observation_phase, sessions=session_factory,
-                                                           call=call, model_name=investigation_agent.model),
-                                 previous_observations=material.get("previous_observations", ()))
+                                                           call=call, model_name=investigation_agent.model,
+                                                           skill_materials=skill_materials),
+                                 previous_observations=material.get("previous_observations", ()),
+                                 skill_materials=skill_materials)
         update.update(await planning.advance_round(state | update, call, root, sessions=session_factory))
         return to_checkpoint_data(update)
 
     graph = StateGraph(InvestigationState, context_schema=InvestigationInvocation)
     graph.add_node("prepare_plan", plan_node)
+    graph.add_node("read_skill", read_node)
     graph.add_node("task_execution", execute_node)
     graph.add_node("observation", observe_node)
 
     graph.add_edge(START, "prepare_plan")
-    graph.add_edge("prepare_plan", "task_execution")
+    graph.add_conditional_edges("prepare_plan", lambda state: state["planning_next"], {
+        "read_skill": "read_skill", "task_execution": "task_execution"})
+    graph.add_edge("read_skill", "prepare_plan")
     graph.add_edge("task_execution", "observation")
     graph.add_conditional_edges(
         "observation",

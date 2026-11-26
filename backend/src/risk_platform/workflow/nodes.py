@@ -35,7 +35,7 @@ from risk_platform.workflow.observation import (
 # 根据当前上下文校验调用
 #     ↓
 # 返回：工具调用，或结构化错误
-async def formulate_task_query(task, planning_input, *, goal, investigation_agent, runtime_context, memory_context=None):
+async def formulate_task_query(task, planning_input, *, goal, investigation_agent, runtime_context, memory_context=None, skill_materials=(), definition_reader=None, definition_events=()):
     """生成工具请求或失败事实；调用方无需再根据错误拼装阶段产物。"""
     started = datetime.now(timezone.utc)
     try:
@@ -44,16 +44,38 @@ async def formulate_task_query(task, planning_input, *, goal, investigation_agen
         limits = {tool.tool.name: tool.execution_limits(runtime_context) for tool in offered}
         # 只传公开声明和参数限制，运行身份、权限回调不进入模型输入。
         async with asyncio.timeout(runtime_context.timeout_seconds):
-            call = await asyncio.to_thread(
-                investigation_agent.formulate_tool_call,
-                task.model_copy(deep=True), planning_input.model_copy(deep=True),
-                goal=goal, tools=declarations, tool_limits=limits,
-                **({"memory_context": memory_context} if memory_context is not None and memory_context.memories else {}),
-            )
+            for _ in range(5):
+                from risk_platform.execution.metric_reads import messages as read_messages
+                call = await asyncio.to_thread(
+                    investigation_agent.formulate_tool_call,
+                    task.model_copy(deep=True), planning_input.model_copy(deep=True),
+                    goal=goal, tools=declarations, tool_limits=limits,
+                    **({"skill_materials": skill_materials} if skill_materials else {}),
+                    **({"memory_context": memory_context} if memory_context is not None and memory_context.memories else {}),
+                    **({"definition_messages": read_messages(definition_events)} if definition_reader else {}),
+                )
+                if not isinstance(call, dict):
+                    break
+                if not definition_reader or call.get("name") != "list_metric_definitions":
+                    raise ValueError("请求阶段选择了未知读取工具")
+                if any(event["call"]["id"] == call["id"] for event in definition_events):
+                    raise ValueError("指标目录调用标识重复")
+                event = await definition_reader(call)
+                definition_events = (*definition_events, event)
+            else:
+                raise ValueError("指标定义读取循环达到上限")
+            if call.tool_name == "query_model_metrics":
+                from risk_platform.execution.metrics import MetricQuery, DefinitionPage
+                request = MetricQuery.model_validate(call.arguments)
+                definitions = [d for e in definition_events for d in DefinitionPage.model_validate(e["result"]).items]
+                if not any(d.model_id == request.model_id and d.metric == request.metric
+                    and d.version == request.definition_version and request.group_by in d.groups
+                    and (request.start_date, request.end_date) in d.windows for d in definitions):
+                    raise ValueError("查询必须对应本任务已读取的指标定义和精确窗口")
             # 中间等待过模型，所以返回后重新核对有意义。后续真正执行工具前仍要检查，尤其恢复时可能直接复用历史请求。
         candidate = validate_tool_call(call, task.capability, runtime_context)
     except ToolUnavailableError as failure:
-        error = ExecutionError(category=ErrorCategory.AUTHORIZATION if failure.code == "TOOL_NOT_BOUND" else ErrorCategory.VALIDATION,
+        error = ExecutionError(category=ErrorCategory.AUTHORIZATION if failure.code in {"TOOL_NOT_BOUND", "TOOL_NOT_AUTHORIZED"} else ErrorCategory.VALIDATION,
                                code=failure.code, message="当前任务没有已绑定的可用工具", retryable=False)
     except (TimeoutError, APITimeoutError):
         error = ExecutionError(category=ErrorCategory.DEPENDENCY, code="QUERY_FORMULATION_TIMEOUT",
@@ -75,7 +97,7 @@ async def formulate_task_query(task, planning_input, *, goal, investigation_agen
         return QueryOutcome(candidate=candidate.arguments, tool_name=candidate.tool_name)
     return QueryOutcome(failure=TaskExecutionResult(
         execution_id="exec-" + uuid4().hex, task_id=task.task_id, capability=task.capability,
-        status=ExecutionStatus.REJECTED if error.code in {"TOOL_NOT_BOUND", "UNSUPPORTED_CAPABILITY"} else ExecutionStatus.FAILED,
+        status=ExecutionStatus.REJECTED if error.code in {"TOOL_NOT_BOUND", "TOOL_NOT_AUTHORIZED", "UNSUPPORTED_CAPABILITY"} else ExecutionStatus.FAILED,
         started_at=started, completed_at=datetime.now(timezone.utc), error=error,
     ))
 
@@ -97,7 +119,7 @@ def _task_result(task, result):
 async def task_execution(
     state: InvestigationState, *, investigation_agent: InvestigationAgent,
     runtime_context: InvestigationRuntimeContext,
-    query_phase, tool_phase,
+    query_phase, tool_phase, skill_materials=(),
 ) -> dict[str, object]:
     """唯一任务循环；请求生成和工具执行分别使用显式注入的持久化入口。
 
@@ -119,23 +141,28 @@ async def task_execution(
         check_runtime(runtime_context, InvestigationAction.CONTINUE, planning_input)
 
         # 延迟生成请求，阶段执行器可以先复用已提交产物。
+        from risk_platform.workflow.planning import select_task_methods
+        methods = select_task_methods((task,), skill_materials)
         query = partial(formulate_task_query, task, planning_input, goal=plan.goal,
-                        investigation_agent=investigation_agent, runtime_context=runtime_context)
+                        investigation_agent=investigation_agent, runtime_context=runtime_context,
+                        skill_materials=methods)
 # 生产环境下：
 # - 已有本轮选定的可靠结果：读取复用，不调用 query()。
 # - 没有结果且策略允许：先登记尝试，再调用 query()，提交产物后返回。
 # 所以，传入函数而不是提前算好结果，是为了让执行器有机会跳过重复模型调用。
-        formed = await query_phase(query, task_id=task.task_id, capability=task.capability)
+        formed = await query_phase(query, task_id=task.task_id, capability=task.capability,
+                                   **({"skill_materials": methods} if methods else {}))
         if formed.failure is not None:
             result = formed.failure
         else:
 #  这里既可能拿到新生成的请求，也可能拿到恢复时读取的历史请求。
 # 因此还要核对：这个工具及参数，在当前任务和运行上下文中是否仍然可用。
             selected = validate_tool_call(ToolCall(formed.tool_name, formed.candidate), task.capability, runtime_context)
-            async def execute_selected():
+            async def execute_selected(*, action_id=None, approved_material=None):
                 result = await tool_definition(selected.tool_name).tool.ainvoke(
                     selected.arguments.model_dump(mode="json"),
-                    config={"configurable": {"runtime": runtime_context, "task": task}},
+                    config={"configurable": {"runtime": runtime_context, "task": task,
+                        "action_id": action_id, "approved_material": approved_material}},
                 )
                 # 入账前校验身份，不能先保存错误结果再拒绝写 State。
                 return _task_result(task, result)
@@ -153,7 +180,7 @@ async def task_execution(
 
 
 async def observation(state: InvestigationState, *, investigation_agent: InvestigationAgent,
-                      runtime_context: InvestigationRuntimeContext, observation_phase, previous_observations=()) -> dict[str, object]:
+                      runtime_context: InvestigationRuntimeContext, observation_phase, previous_observations=(), skill_materials=()) -> dict[str, object]:
     """统一 Observation 阶段入口，分离解释逻辑与持久化机制。"""
     planning_input = _business_model(InitialPlanningInput, state["planning_input"])
     check_runtime(runtime_context, InvestigationAction.CONTINUE, planning_input)
@@ -171,6 +198,7 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
             plan, results, planning_input=planning_input,
             investigation_agent=investigation_agent, timeout_seconds=runtime_context.timeout_seconds,
             previous_observations=previous_observations,
+            skill_materials=skill_materials,
             available_capabilities=tuple(capability for capability in planning_input.available_capabilities
                 if any(tool_definition(binding.name).capability == capability for binding in runtime_context.tools)),
         )
@@ -203,7 +231,7 @@ async def observation(state: InvestigationState, *, investigation_agent: Investi
 
 async def _interpret_observation(
     plan, results, *, planning_input, investigation_agent: InvestigationAgent,
-    timeout_seconds, previous_observations=(), available_capabilities=(),
+    timeout_seconds, previous_observations=(), available_capabilities=(), skill_materials=(),
 ):
     """解释已校验的本轮结果并验证引用；材料不足或模型失败时返回不确定。"""
     summaries, _ = summarize_executions(results)
@@ -224,6 +252,7 @@ async def _interpret_observation(
                 planning_input=planning_input.model_copy(deep=True),
                 previous_observations=previous_observations,
                 available_capabilities=available_capabilities,
+                **({"skill_materials": skill_materials} if skill_materials else {}),
             )
             # 完成正式 Observation 的构造和来源校验。
         output = complete_observation(results, draft)

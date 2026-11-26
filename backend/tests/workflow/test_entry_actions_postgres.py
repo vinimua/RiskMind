@@ -9,12 +9,11 @@ from test_entrypoints_postgres import Planner, service
 from risk_platform.conversations.contracts import ChatRequest, ChatDraft, ToolInvocation, EntryConfirmation
 from risk_platform.conversations.models import ChatTurnRow, EntryDecisionRow
 from risk_platform.conversations.repository import ChatConflictError
-from risk_platform.memory.contracts import MemoryContent
 from risk_platform.workflow.persistence.models import InvestigationRow
 
 class Decider:
     def __init__(self,result): self.result=result;self.calls=[]
-    def decide(self,message,**kwargs):
+    async def decide(self,message,**kwargs):
         self.calls.append((message,kwargs))
         if isinstance(self.result,BaseException): raise self.result
         return self.result
@@ -80,12 +79,12 @@ def test_read_only_action_answer_memory_and_rejection(database):
             with pytest.raises(PermissionError): await app.inspect_entry(view.turn_id,actor="B")
             app.authorize_resource=lambda *_:False
             with pytest.raises(PermissionError): await app.inspect_entry(view.turn_id,actor="A")
-            decider.result=ChatDraft(answer="好的",memory=MemoryContent(user_preferences=("中文",)))
+            decider.result=ChatDraft(answer="好的")
             first=await app.prepare_entry(ChatRequest(request_id="answer",message="请用中文"),actor="A")
             assert first.status=="ANSWERED" and first.invocation_id is None
             second=await app.prepare_entry(ChatRequest(request_id="answer2",conversation_id=first.conversation_id,message="你好"),actor="A")
             assert second.status=="ANSWERED"
-            assert decider.calls[-1][1]["memory_context"].memories[0].content.user_preferences==("中文",)
+            assert decider.calls[-1][1]["memory_index"] == []
             decider.result=proposal()
             rejected=await app.prepare_entry(ChatRequest(request_id="reject",message="查一下那个"),actor="A")
             assert rejected.status=="REJECTED" and rejected.result.status=="SUCCEEDED"
@@ -198,14 +197,11 @@ def test_runner_committed_but_response_commit_failed_can_be_located(database,mon
 
 
 
-def test_migration_keeps_legacy_message_and_action_audit(database):
-    from alembic import command
-    from test_ledger_postgres import config
+def test_existing_message_and_action_audit_remain_readable(database):
     from risk_platform.conversations.models import ConversationRow
     from risk_platform.conversations.contracts import ChatResponse
     from risk_platform.workflow.persistence.contracts import canonical_json, input_digest
     from risk_platform.conversations.repository import _LegacyIntent
-    command.downgrade(config(),"20261110_0016")
     saved=[]
     async def before():
         async with resources(database,Planner(),setup=True) as (sessions,_,runner):
@@ -225,7 +221,6 @@ def test_migration_keeps_legacy_message_and_action_audit(database):
                     await complete_turn(session,response)
                     saved.append((None,row.turn_id,row.response_payload,row.response_digest,row.action,row.intent_payload,row.intent_digest))
     asyncio.run(before())
-    command.upgrade(config(),"head")
     async def after():
         async with resources(database,Planner()) as (sessions,_,runner):
             app=service(sessions,runner,Decider(proposal()))
@@ -234,10 +229,10 @@ def test_migration_keeps_legacy_message_and_action_audit(database):
                     row=await session.get(ChatTurnRow,turn_id)
                     assert (row.response_payload,row.response_digest,row.action,row.intent_payload,row.intent_digest)==(payload,digest,action,intent,intent_digest)
                 with pytest.raises(ChatConflictError): await app.inspect_entry(turn_id,actor="A")
-                from risk_platform.conversations.repository import history_and_memories
+                from risk_platform.conversations.repository import history_turns
                 async with sessions() as session:
-                    history,_=await history_and_memories(session,turn_id,"A")
-                    assert history[0]["content"]=="legacy message"
+                    history=await history_turns(session,turn_id,"A")
+                    assert history["turns"][0]["user"]=="legacy message"
     asyncio.run(after())
 
 

@@ -129,7 +129,7 @@ async def _check_registered_operation(session, value, context):
             raise InvestigationAccessError("工具能力不属于当前正式任务")
         if not any(binding.name == name for binding in context.tools):
             raise InvestigationAccessError("工具当前未绑定")
-        if definition.execution_limits(context) != recorded:
+        if definition.stage_limits(context) != recorded:
             raise InvestigationAccessError("工具范围或输入限制已变化，不能沿用原记录")
         if value.candidate_request is not None:
             request = definition.tool.args_schema.model_validate(value.candidate_request)

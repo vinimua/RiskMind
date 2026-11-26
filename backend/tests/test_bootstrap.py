@@ -55,6 +55,18 @@ def test_local_auth_and_grants_are_explicit():
         assert not config.authorize_knowledge("local-user","knowledge:search",good.model_copy(update=changed))
 
 
+def test_controlled_action_permissions_are_explicit_and_scoped(tmp_path):
+    base = settings()
+    resource = InvestigationResource("I", "R", "M")
+    assert not base.authorize_resource("local-user", "action:approve", resource)
+    configured = bootstrap.LocalSettings.model_validate(base.model_dump() | {"report_directory": tmp_path,
+        "action_permissions": ("action:request", "action:read", "action:approve", "action:download")})
+    assert configured.authorize_resource("local-user", "action:approve", resource)
+    assert not configured.authorize_resource("local-user", "action:resolve", resource)
+    assert not configured.authorize_resource("other", "action:approve", resource)
+    assert not configured.authorize_resource("local-user", "action:approve", InvestigationResource("I", "R", "OTHER"))
+
+
 def test_explicit_enable_and_required_configuration(monkeypatch):
     configure(monkeypatch)
     monkeypatch.delenv("RISK_LOCAL_MODE")

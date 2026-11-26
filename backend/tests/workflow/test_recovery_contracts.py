@@ -1,6 +1,13 @@
 import pytest
 
 from risk_platform.workflow.checkpoints import JsonCheckpointSerializer
+
+
+def test_checkpoint_preserves_native_interrupt_identity_without_pickle():
+    from langgraph.types import Interrupt
+    serde = JsonCheckpointSerializer()
+    pending = (Interrupt(value={"action_id": "A", "status": "WAITING_APPROVAL"}, id="pause-1"),)
+    assert serde.loads_typed(serde.dumps_typed(pending)) == pending
 from risk_platform.workflow.persistence.recovery_contracts import RecoveryPolicy
 
 

@@ -8,23 +8,22 @@ from risk_platform.entrypoints import EntryServices, AlertRequest
 from risk_platform.conversations.contracts import ChatRequest, ChatDraft
 from risk_platform.conversations.models import ChatTurnRow
 from risk_platform.conversations.repository import ChatConflictError, ChatBusyError, claim_turn
-from risk_platform.memory.contracts import MemoryContent
 from risk_platform.workflow.contracts import InvestigationPlan, InvestigationTask
 from risk_platform.workflow.persistence.models import InvestigationRow
 from risk_platform.workflow.knowledge_tool import KnowledgeSearchTool
 from risk_platform.execution.contracts import KnowledgeExecutionContext
 
 class Planner(Agent):
-    def initial_plan(self, source):
+    def initial_plan(self, source, **kwargs):
         self.events.append("initial-plan")
         return InvestigationPlan(goal="Investigate",tasks=[InvestigationTask(task_id=f"T{i}",objective="history",
             capability="KNOWLEDGE_RETRIEVAL",expected_result="clues") for i in range(2)])
 
 class Chat:
     def __init__(self): self.calls=[]
-    def decide(self,message,*,history,memory_context,**kwargs):
-        self.calls.append((history,memory_context))
-        return ChatDraft(answer="Answer",memory=MemoryContent(user_preferences=("Use Chinese",)))
+    async def decide(self,message,*,history,memory_index,read_memory,**kwargs):
+        self.calls.append((history,memory_index,read_memory))
+        return ChatDraft(answer="Answer")
 
 def service(sessions,runner,chat):
     return EntryServices(sessions=sessions,runner=runner,chat_agent=chat,

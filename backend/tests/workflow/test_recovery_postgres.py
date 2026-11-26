@@ -49,13 +49,16 @@ class ProcessLost(BaseException):
 
 
 class Agent:
+    from risk_platform.agents.skills import SkillDirectory
+    from risk_platform.agents import investigation as agent_module
+    skill_directory = SkillDirectory(Path(agent_module.__file__).with_name("skill_library"))
     model = "test-model"
 
     def __init__(self):
         self.events = []
         self.query_failure = False
 
-    def initial_plan(self, *_):
+    def initial_plan(self, *_, **kwargs):
         pytest.fail("恢复不能重新规划或生成新 task_id")
 
     def formulate_tool_call(self, task, *_args, **_kwargs):

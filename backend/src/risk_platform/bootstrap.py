@@ -13,7 +13,10 @@ import json
 import os
 from contextlib import AsyncExitStack, asynccontextmanager
 from functools import partial
+from pathlib import Path
+from typing import Literal
 from risk_platform.execution.csv_statistics import CsvDataset, CsvStatisticsTool
+from risk_platform.execution.report_export import ReportExportTool
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from sqlalchemy import text
@@ -59,9 +62,19 @@ class LocalSettings(BaseModel):
     timeout_seconds: float = Field(default=120, gt=0, allow_inf_nan=False)
     max_top_k: int = Field(default=5, gt=0, strict=True)
     csv_datasets: tuple[CsvDataset, ...] = ()
+    report_directory: Path | None = None
+    metrics_mcp_url: str | None = None
+    metrics_mcp_token: SecretStr | None = Field(default=None, repr=False)
+    action_permissions: tuple[Literal["action:request", "action:read", "action:approve", "action:resolve", "action:download"], ...] = ()
 
     @model_validator(mode="after")
     def unique_models(self):
+        if bool(self.metrics_mcp_url) != bool(self.metrics_mcp_token):
+            raise ValueError("指标MCP地址与凭证必须同时配置")
+        if self.metrics_mcp_url and not self.metrics_mcp_url.startswith("https://"):
+            raise ValueError("指标MCP必须使用HTTPS")
+        if self.report_directory is not None and not self.report_directory.is_absolute():
+            raise ValueError("Report directory must be an explicit absolute path")
         if len(set(self.allowed_model_ids)) != len(self.allowed_model_ids):
             raise ValueError("allowed_model_ids contains duplicates")
         if len({d.dataset_id for d in self.csv_datasets}) != len(self.csv_datasets):
@@ -80,7 +93,11 @@ class LocalSettings(BaseModel):
             api_token=required("RISK_LOCAL_API_TOKEN"),
             allowed_model_ids=json.loads(required("RISK_ALLOWED_MODEL_IDS")),
             knowledge_profile=required("RISK_KNOWLEDGE_PROFILE"),
-            csv_datasets=json.loads(os.environ.get("RISK_CSV_DATASETS", "[]")))
+            csv_datasets=json.loads(os.environ.get("RISK_CSV_DATASETS", "[]")),
+            report_directory=os.environ.get("RISK_REPORT_DIRECTORY") or None,
+            metrics_mcp_url=os.environ.get("RISK_METRICS_MCP_URL") or None,
+            metrics_mcp_token=os.environ.get("RISK_METRICS_MCP_TOKEN") or None,
+            action_permissions=json.loads(os.environ.get("RISK_ACTION_PERMISSIONS", "[]")))
 
     def authenticate(self, request):
         # 认证回答“是谁”：校验 Authorization: Bearer <token> 后返回配置中的身份。
@@ -99,7 +116,7 @@ class LocalSettings(BaseModel):
     def authorize_resource(self, actor, action, resource):
         # 调查操作还必须落在允许的业务模型范围内，不能只凭用户身份放行。
         return (actor == self.actor_id and resource.model_id in self.allowed_model_ids
-                and action in {"investigation:create", "investigation:read", "investigation:continue"})
+                and action in {"investigation:create", "investigation:read", "investigation:continue", *self.action_permissions})
 
     def authorize_knowledge(self, actor, action, execution):
         # 工具调用另行核对执行身份、模型范围、索引配置及检索数量上限。
@@ -134,7 +151,7 @@ async def local_services(settings):
         # Fail before accepting requests if deployment migrations/checkpoints are absent.
         # 这里只检查关键表是否存在，并非完整 schema 校验；建表与迁移需部署步骤显式完成。
         async with engine.connect() as connection:
-            for table in ("chat_entry_decisions", "investigation_runs", "checkpoints"):
+            for table in ("chat_entry_decisions", "investigation_runs", "checkpoints", "controlled_actions", "controlled_action_audit", "investigation_planning_dialogue"):
                 if await connection.scalar(text("SELECT to_regclass(:name)"), {"name": table}) is None:
                     raise RuntimeError("Database schema is not prepared; apply migrations and checkpoint setup explicitly")
         saver = await stack.enter_async_context(postgres_checkpointer(database_url, setup=False))
@@ -151,6 +168,23 @@ async def local_services(settings):
         milvus = await asyncio.to_thread(get_client, milvus_uri)
         stack.push_async_callback(asyncio.to_thread, milvus.close)
 
+# 应用启动
+#   → 检查配置
+#   → 检查读取记录表
+#   → 连接并初始化 MCP
+#   → metrics_client 可用
+#   → 后续绑定指标工具、处理请求
+# 应用关闭或后续启动步骤失败
+#   → stack 自动关闭 MCP 会话和连接
+        metrics_client = None
+        if settings.metrics_mcp_url is not None:
+            from risk_platform.execution.metrics import connect_metrics
+            async with sessions() as session:
+                if await session.scalar(text("SELECT to_regclass('investigation_query_reads')")) is None:
+                    raise RuntimeError("指标请求阶段记录未迁移，请先应用0026迁移")
+            metrics_client = await stack.enter_async_context(connect_metrics(settings.metrics_mcp_url,
+                settings.metrics_mcp_token.get_secret_value(), timeout=settings.timeout_seconds))
+
         def tools_for(actor, source):
             # 为本次调查绑定可信的检索范围。闭包复用应用资源，不把客户端塞入 State。
             model_id = source.monitoring_alert.model_id if source.monitoring_alert else source.user_query.model_id
@@ -162,8 +196,13 @@ async def local_services(settings):
             bound = (KnowledgeSearchTool(execution, settings.authorize_knowledge,
                 session_factory=sessions, embedding_client=embedder, milvus_client=milvus),)
             datasets = tuple(d for d in settings.csv_datasets if d.model_id == model_id)
+            if metrics_client is not None:
+                from risk_platform.execution.metrics import MetricsTool
+                bound += (MetricsTool(actor_id=actor, model_id=model_id, client=metrics_client),)
             if datasets:
                 bound += (CsvStatisticsTool(actor_id=actor, model_id=model_id, datasets=datasets),)
+            if settings.report_directory is not None and {"action:request", "action:download"}.intersection(settings.action_permissions):
+                bound += (ReportExportTool(actor_id=actor, model_id=model_id, directory=settings.report_directory),)
             return bound
 
         # yield 前完成资源准备，yield 期间由 HTTP 入口使用这些服务；退出后统一清理。

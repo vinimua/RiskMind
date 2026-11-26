@@ -32,10 +32,16 @@ class JsonCheckpointSerializer:
         return json.loads(value, parse_constant=invalid_constant)
 
     def dumps_typed(self, value):
+        from langgraph.types import Interrupt
+        if isinstance(value, tuple) and value and all(isinstance(item, Interrupt) for item in value):
+            return "interrupt", self.dumps([{"id": item.id, "value": item.value} for item in value])
         return "json", self.dumps(value)
 
     def loads_typed(self, value):
         kind, data = value
+        if kind == "interrupt":
+            from langgraph.types import Interrupt
+            return tuple(Interrupt(id=item["id"], value=item["value"]) for item in self.loads(data))
         if kind != "json":
             raise ValueError("拒绝非 JSON checkpoint")
         return self.loads(data)

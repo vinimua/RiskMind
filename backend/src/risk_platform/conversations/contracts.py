@@ -1,7 +1,7 @@
 """聊天入口的业务参数；操作者和权限不由请求体或模型提供。"""
 from typing import Literal, Self
 from pydantic import Field, model_validator
-from risk_platform.memory.contracts import Identity, NonBlank, MemoryContract, MemoryContent
+from risk_platform.memory.contracts import Identity, NonBlank, MemoryContract
 
 
 class ChatRequest(MemoryContract):
@@ -20,7 +20,31 @@ class ChatRequest(MemoryContract):
 
 class ChatDraft(MemoryContract):
     answer: NonBlank = Field(max_length=16000)
-    memory: MemoryContent = Field(default_factory=MemoryContent)
+    memory_candidate: NonBlank | None = Field(default=None, max_length=2000)
+
+
+class ConversationSummaryDraft(MemoryContract):
+    """只承载摘要正文；覆盖边界和版本由程序确定。"""
+    summary: NonBlank = Field(max_length=12000)
+
+
+class ReadChatHistoryRequest(MemoryContract):
+    """只读取服务端绑定的当前会话，不接受用户或会话身份。"""
+    from_turn: int = Field(ge=1, strict=True)
+    to_turn: int = Field(ge=1, strict=True)
+    read_interaction: int | None = Field(default=None, ge=0, strict=True,
+        description="回看当时读取的笔记时指定该轮读取序号；不填则读取原始问答")
+    start_paragraph: int = Field(default=0, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def ordered_range(self):
+        if self.to_turn < self.from_turn:
+            raise ValueError("历史结束位置不能早于开始位置")
+        if self.read_interaction is not None and self.from_turn != self.to_turn:
+            raise ValueError("回查读取快照必须指定单个历史轮次")
+        if self.read_interaction is None and self.start_paragraph:
+            raise ValueError("完整问答不能按段落截取")
+        return self
 
 
 class ProgressReadArguments(MemoryContract):
@@ -53,7 +77,7 @@ class ChatResponse(MemoryContract):
     status: Literal["SUCCEEDED", "FAILED"]
     answer: NonBlank
     investigation_id: Identity | None = None
-    error_code: Literal["FORBIDDEN", "NOT_FOUND", "CONFLICT", "DEPENDENCY"] | None = None
+    error_code: Literal["FORBIDDEN", "NOT_FOUND", "CONFLICT", "DEPENDENCY", "CONTEXT_BUDGET", "COMPACTION_FAILED"] | None = None
 
     @model_validator(mode="after")
     def valid_outcome(self) -> Self:

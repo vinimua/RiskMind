@@ -23,3 +23,7 @@ class ToolModelStub:
         if isinstance(self.response, Exception):
             raise self.response
         return self.response
+
+
+    async def ainvoke(self, messages, **options):
+        return self.invoke(messages, **options)

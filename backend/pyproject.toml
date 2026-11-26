@@ -14,6 +14,7 @@ dependencies = [
   "openai",
   "uvicorn[standard]",
   "pydantic-settings",
+  "PyYAML>=6,<7",
   "tokenizers==0.22.2",
 ]
 
@@ -25,12 +26,15 @@ modelops = ["mlflow"]
 observability = ["langfuse>=4,<5"]
 knowledge = ["pymilvus==2.6.17"]
 recovery = ["langgraph-checkpoint-postgres>=2.0.25,<4", "psycopg[binary]"]
+mcp = ["mcp==2.3.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 "risk_platform.core" = ["deepseek_v4_tokenizer.json"]
+"risk_platform.api" = ["action_review.html"]
+"risk_platform.agents" = ["skill_library/*/SKILL.md", "skill_library/*/references/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

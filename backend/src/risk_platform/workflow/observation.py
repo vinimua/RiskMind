@@ -164,6 +164,8 @@ def validate_round_inputs(plan: InvestigationPlan, results: list[TaskExecutionRe
     return plan, results
 
 
+# summarize_executions() 是**用代码把每次工具执行归纳成“执行状态＋结果类型”**的函数
+# 不调用大模型，也不压缩正文。
 def summarize_executions(results):
     summaries, gaps = [], []
     for result in results:
@@ -177,6 +179,13 @@ def summarize_executions(results):
             outcome = "EXECUTION_REJECTED" if result.status == ExecutionStatus.REJECTED else "EXECUTION_FAILED"
         summaries.append(ExecutionObservation(execution_id=result.execution_id, task_id=result.task_id,
                                               status=result.status, outcome=outcome))
+#ExecutionObservation(
+#     execution_id="exec-001",
+#     task_id="task-001",
+#     status="SUCCEEDED",
+#     outcome="RESULT_AVAILABLE",
+# )
+# 这只说明：哪个任务的哪次执行成功了，而且有材料。 不说明材料证明了什么。
         if outcome not in ("KNOWLEDGE_AVAILABLE", "RESULT_AVAILABLE"):
             text = {"NO_HITS": "知识检索正常完成但没有命中，不代表不存在相关知识。",
                     "EXECUTION_REJECTED": "知识执行被拒绝，本任务尚未完成知识查询。",
@@ -213,6 +222,41 @@ def build_observation_input(plan, results, *, planning_input=None, previous_obse
 # 给 Observation 模型看的执行结果列表
 # ```
 # 它**不执行工具、不生成结论、不修改数据库结果**。
+
+def result_page(result, *, start_item=0, max_tokens=3000):
+    """分页读取已提交结果的完整项，保留状态；调用方负责案件和工具权限。"""
+    from risk_platform.execution.tools import tool_definition
+    from risk_platform.core.token_budget import request_tokens
+    summary = summarize_executions([result])[0][0]
+    page = dict(execution_id=result.execution_id, status=result.status.value,
+                outcome=summary.outcome, start_item=start_item, items=[])
+    units = []
+    if result.payload is not None:
+        definition = tool_definition(result.tool_name or "knowledge_search")
+        payload = definition.result_model.model_validate(
+            result.payload.model_dump() if isinstance(result.payload, BaseModel) else result.payload)
+        units = definition.to_observation_items(payload)
+        identities = [u["reference_id"] for u in units]
+        if len(set(identities)) != len(identities) or any(not isinstance(i, str) or not i.strip() for i in identities):
+            raise ObservationIntegrityError("结果项引用身份无效")
+    if result.error is not None:
+        page["error"] = result.error.model_dump(mode="json")
+    if start_item < 0 or start_item > len(units) or (start_item == len(units) and start_item != 0):
+        raise ValueError("结果项范围不存在")
+    end = start_item
+    for unit in units[start_item:]:
+        candidate = page | dict(items=[*page["items"], unit], next_item=end+1, total_items=len(units))
+        if request_tokens([candidate]) > max_tokens:
+            if not page["items"]:
+                raise ContextBudgetExceeded("单个完整结果项超过读取预算")
+            break
+        page["items"].append(unit)
+        end += 1
+    page.update(next_item=end if end < len(units) else None, total_items=len(units))
+    if request_tokens([page]) > max_tokens:
+        raise ContextBudgetExceeded("结果元数据超过读取预算")
+    return page
+
 
 def project_tool_results(results, *, max_tokens=TOOL_OBSERVATION_TOKENS,
                          context_tokens=TOOL_CONTEXT_TOKENS):

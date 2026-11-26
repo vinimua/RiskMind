@@ -19,13 +19,12 @@ def test_real_sdk_context_usage_and_privacy(monkeypatch):
     monkeypatch.setattr(obs,"get_langfuse",lambda:client)
     from langchain_core.messages import AIMessage
     from tool_model_helpers import ToolModelStub
-    message = AIMessage(content='{"answer":"PRIVATE_SENTINEL","memory":{}}',
+    message = AIMessage(content='{"answer":"PRIVATE_SENTINEL","memory_candidate":null}',
         response_metadata={"finish_reason":"stop"},usage_metadata={"input_tokens":3,"output_tokens":2,"total_tokens":5})
     agent=ChatAgent("test-model",tool_model=ToolModelStub(message))
     @obs.trace_chat
     async def scenario():
-        await asyncio.to_thread(agent.decide,"PRIVATE_SENTINEL",history=[],
-            memory_context=AgentContext(scope=MemoryScope(kind="CONVERSATION",id="C")))
+        await agent.decide("PRIVATE_SENTINEL",history=[],memory_index=[],read_memory=None)
         with pytest.raises(ValueError):
             with obs.observation("failing-operation"): raise ValueError("PRIVATE_SENTINEL")
         return ChatResponse(conversation_id="C",turn_id="T",status="SUCCEEDED",answer="PRIVATE_SENTINEL")

@@ -31,7 +31,7 @@ from test_ledger_postgres import database, pytestmark
 
 
 class Planner(Agent):
-    def initial_plan(self, source):
+    def initial_plan(self, source, **kwargs):
         self.events.append("initial-plan")
         assert source.user_query.model_id == "M"
         return InvestigationPlan(goal="调查历史背景", tasks=[InvestigationTask(task_id=f"T{i}", objective="查历史",
@@ -75,14 +75,15 @@ def test_no_plan_id_starts_planning_inside_graph_then_reuses_everything(database
 def test_committed_candidate_or_acceptance_survives_missing_node_checkpoint(database, monkeypatch, boundary):
     agent = Planner()
     retrieval(monkeypatch, agent)
-    name = "_planning_candidate" if boundary == "candidate" else "prepare_plan"
+    name = "_accept_candidate" if boundary == "candidate" else "prepare_plan"
     original, crashed = getattr(planning_module, name), {"done": False}
     async def interrupt(*args, **kwargs):
-        result = await original(*args, **kwargs)
+        if boundary == "acceptance":
+            result = await original(*args, **kwargs)
         if not crashed["done"]:
             crashed["done"] = True
             raise ProcessLost("planning phase committed before node checkpoint")
-        return result
+        return await original(*args, **kwargs) if boundary == "candidate" else result
     monkeypatch.setattr(planning_module, name, interrupt)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
@@ -106,7 +107,7 @@ def test_committed_candidate_or_acceptance_survives_missing_node_checkpoint(data
 def test_invalid_initial_plan_is_not_accepted_or_executed(database, monkeypatch, bad):
     agent = Planner()
     original = agent.initial_plan
-    def invalid(source):
+    def invalid(source, **kwargs):
         plan = original(source)
         if bad == "duplicate": plan.tasks[1].task_id = plan.tasks[0].task_id
         elif bad == "capability": plan.tasks[0].capability = CapabilityType.COMPUTATION
@@ -137,7 +138,7 @@ def test_invalid_initial_plan_is_not_accepted_or_executed(database, monkeypatch,
 def test_unknown_planning_interruption_requires_explicit_retry_and_preserves_actor(database, monkeypatch):
     agent = Planner()
     original = agent.initial_plan
-    def interrupted(*_):
+    def interrupted(*_, **kwargs):
         raise ProcessLost("API outcome unknown")
     agent.initial_plan = interrupted
     async def scenario():
@@ -158,7 +159,7 @@ def test_revoked_continue_after_model_never_accepts_or_executes(database):
     agent = Planner()
     allowed = {"value": True}
     original = agent.initial_plan
-    def revoke(source):
+    def revoke(source, **kwargs):
         result = original(source)
         allowed["value"] = False
         return result
@@ -181,7 +182,7 @@ def test_concurrent_initial_planning_is_blocked_by_same_round_lock(database, mon
     retrieval(monkeypatch, agent)
     started, release = threading.Event(), threading.Event()
     original = agent.initial_plan
-    def blocked(source):
+    def blocked(source, **kwargs):
         started.set()
         if not release.wait(15): raise TimeoutError()
         return original(source)
@@ -205,7 +206,7 @@ def test_lost_planning_lock_fences_old_candidate_after_new_actor_finishes(databa
     retrieval(monkeypatch, new_agent)
     started, release, observed = threading.Event(), threading.Event(), {}
     original = old_agent.initial_plan
-    def blocked(source):
+    def blocked(source, **kwargs):
         started.set()
         if not release.wait(20): raise TimeoutError()
         return original(source)
@@ -281,11 +282,10 @@ def test_multiple_accepted_plans_are_not_silently_selected(database):
 
 def test_acceptance_cannot_bind_different_plan_content_to_committed_candidate(database, monkeypatch):
     agent = Planner()
-    original = planning_module._planning_candidate
+    original = planning_module._accept_candidate
     async def interrupt(*args, **kwargs):
-        result = await original(*args, **kwargs)
         raise ProcessLost("candidate committed")
-    monkeypatch.setattr(planning_module, "_planning_candidate", interrupt)
+    monkeypatch.setattr(planning_module, "_accept_candidate", interrupt)
     async def scenario():
         async with resources(database, agent, setup=True) as (sessions, saver, runner):
             await seed_round(sessions)
@@ -320,11 +320,10 @@ from risk_platform.workflow import recovery
 from risk_platform.workflow import planning as planning_module
 if hasattr(asyncio, "WindowsSelectorEventLoopPolicy"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-original = planning_module._planning_candidate
+original = planning_module._accept_candidate
 async def exit_after_candidate(*args, **kwargs):
-    await original(*args, **kwargs)
     os._exit(23)
-planning_module._planning_candidate = exit_after_candidate
+planning_module._accept_candidate = exit_after_candidate
 async def main():
     async with resources(os.environ["PLANNING_TEST_DATABASE_URL"], Planner()) as (sessions, saver, runner):
         await call(runner, sessions)

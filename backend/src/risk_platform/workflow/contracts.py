@@ -79,11 +79,19 @@ class InitialPlanningInput(BaseModel):
         return self
 
 
+class SkillMaterialRef(BaseModel):
+    """任务引用本轮已读取的方法文件；正文归规划账本所有。"""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    skill_name: str = Field(min_length=1)
+    resource: str = Field(min_length=1)
+
+
 class InvestigationTask(BaseModel):
     task_id: str = Field(default_factory=lambda: str(uuid4()))
     objective: str
     capability: CapabilityType
     expected_result: str
+    skill_refs: tuple[SkillMaterialRef, ...] = ()
     status: TaskStatus = TaskStatus.PENDING
 
 
